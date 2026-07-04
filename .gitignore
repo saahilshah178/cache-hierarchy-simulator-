@@ -1,0 +1,6 @@
+__pycache__/
+traces/*.trace
+*.pyc
+.venv/
+plots/
+.DS_Store
