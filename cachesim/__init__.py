@@ -1,5 +1,7 @@
 """cachesim: a trace-driven cache and memory-hierarchy simulator."""
 
+from typing import Any
+
 from cachesim.cache import Cache
 from cachesim.config import DEFAULT_CONFIG, default_config, load_config
 from cachesim.hierarchy import Hierarchy, Level
@@ -26,7 +28,7 @@ __all__ = [
 ]
 
 
-def run_trace(trace_path: str, config: dict | None = None) -> Hierarchy:
+def run_trace(trace_path: str, config: dict[str, Any] | None = None) -> Hierarchy:
     """Simulate one trace through one hierarchy; returns the Hierarchy."""
     hierarchy = Hierarchy.from_config(config or DEFAULT_CONFIG)
     for addr, is_write in parse_trace(trace_path):

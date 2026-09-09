@@ -27,8 +27,11 @@ Usage::
 Prints a table for each sweep and saves plots to plots/*.png (matplotlib).
 """
 
+from __future__ import annotations
+
 import argparse
 import os
+from collections.abc import Sequence
 
 from cachesim.cache import Cache
 from cachesim.hierarchy import Hierarchy, Level
@@ -39,7 +42,15 @@ ASSOCIATIVITIES = [1, 2, 4, 8, 16]
 SIZES_KB = [1, 2, 4, 8, 16, 32, 64]
 
 
-def run_single_level(trace, size, block_size, associativity, policy, hit_time, mem_time):
+def run_single_level(
+    trace: Sequence[tuple[int, bool]],
+    size: int,
+    block_size: int,
+    associativity: int,
+    policy: str,
+    hit_time: int,
+    mem_time: int,
+) -> tuple[float, float, Cache]:
     """Simulate `trace` (a list of (addr, is_write)) through one cache level.
 
     Returns (miss_rate, amat, cache) for that configuration.
@@ -51,13 +62,20 @@ def run_single_level(trace, size, block_size, associativity, policy, hit_time, m
     return cache.miss_rate, hier.amat(), cache
 
 
-def sweep_associativity(trace, size, block_size, policy, hit_time, mem_time):
+def sweep_associativity(
+    trace: Sequence[tuple[int, bool]],
+    size: int,
+    block_size: int,
+    policy: str,
+    hit_time: int,
+    mem_time: int,
+) -> list[tuple[int, float]]:
     print(f"\n=== associativity sweep (size fixed at {size // 1024} KB, {policy.upper()}) ===")
     print(
         f"{'ways':>5} {'miss rate':>10} {'AMAT':>8}   "
         f"{'compulsory':>10} {'capacity':>9} {'conflict':>9}"
     )
-    results = []
+    results: list[tuple[int, float]] = []
     for ways in ASSOCIATIVITIES:
         miss_rate, amat, c = run_single_level(
             trace, size, block_size, ways, policy, hit_time, mem_time
@@ -71,13 +89,20 @@ def sweep_associativity(trace, size, block_size, policy, hit_time, mem_time):
     return results
 
 
-def sweep_size(trace, associativity, block_size, policy, hit_time, mem_time):
+def sweep_size(
+    trace: Sequence[tuple[int, bool]],
+    associativity: int,
+    block_size: int,
+    policy: str,
+    hit_time: int,
+    mem_time: int,
+) -> list[tuple[int, float]]:
     print(f"\n=== size sweep (associativity fixed at {associativity}-way, {policy.upper()}) ===")
     print(
         f"{'size':>7} {'miss rate':>10} {'AMAT':>8}   "
         f"{'compulsory':>10} {'capacity':>9} {'conflict':>9}"
     )
-    results = []
+    results: list[tuple[int, float]] = []
     for kb in SIZES_KB:
         miss_rate, amat, c = run_single_level(
             trace, kb * 1024, block_size, associativity, policy, hit_time, mem_time
@@ -92,8 +117,14 @@ def sweep_size(trace, associativity, block_size, policy, hit_time, mem_time):
 
 
 def plot(
-    assoc_results, size_results, assoc_trace, size_trace, fixed_size, fixed_assoc, out_dir="plots"
-):
+    assoc_results: list[tuple[int, float]],
+    size_results: list[tuple[int, float]],
+    assoc_trace: str,
+    size_trace: str,
+    fixed_size: int,
+    fixed_assoc: int,
+    out_dir: str = "plots",
+) -> None:
     """Save the two miss-rate plots. Skipped (with a note) if matplotlib
     is not installed — the tables above still tell the story."""
     try:
@@ -110,7 +141,7 @@ def plot(
 
     os.makedirs(out_dir, exist_ok=True)
 
-    def trace_base(path):
+    def trace_base(path: str) -> str:
         return os.path.splitext(os.path.basename(path))[0]
 
     for results, xlabel, fixed_desc, trace_name, kind in [
@@ -144,7 +175,7 @@ def plot(
         print(f"saved {path}")
 
 
-def main(argv=None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Sweep cache associativity and size; plot miss rates."
     )

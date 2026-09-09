@@ -163,8 +163,12 @@ class Cache:
             self._update_shadow(block)
 
         # Fill: prefer an empty way; otherwise ask the policy for a victim.
-        way = next((w for w in range(self.associativity) if not valid[w]), None)
-        if way is None:
+        way = -1
+        for w in range(self.associativity):
+            if not valid[w]:
+                way = w
+                break
+        if way < 0:
             way = self.policy.victim(set_idx)
             self.evictions += 1
             if self._dirty[set_idx][way]:

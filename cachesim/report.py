@@ -1,17 +1,20 @@
-"""report.py — turns a simulated Hierarchy into a human-readable report.
+"""Turns a simulated Hierarchy into a human-readable report.
 
-Everything here is presentation: per-level hit/miss tables, local vs global
-miss rates, the 3-C miss breakdown, and AMAT. See README.md for what each
-number means.
+Everything here is presentation: per-level hit/miss tables, local and global
+miss rates, the 3-C miss breakdown, and AMAT.
 """
 
+from __future__ import annotations
 
-def _pct(part, whole):
+from cachesim.hierarchy import Hierarchy
+
+
+def _pct(part: float, whole: float) -> str:
     """Format part/whole as a percentage string, safe against divide-by-zero."""
     return f"{100.0 * part / whole:6.2f}%" if whole else "   n/a "
 
 
-def _size_str(nbytes):
+def _size_str(nbytes: int) -> str:
     """32768 -> '32.0 KB', 2097152 -> '2.0 MB'."""
     if nbytes >= 1 << 20:
         return f"{nbytes / (1 << 20):.1f} MB"
@@ -20,10 +23,10 @@ def _size_str(nbytes):
     return f"{nbytes} B"
 
 
-def build_report(hierarchy, trace_name=None):
+def build_report(hierarchy: Hierarchy, trace_name: str | None = None) -> str:
     """Return the full multi-line report string for a finished simulation."""
     h = hierarchy
-    lines = []
+    lines: list[str] = []
     bar = "=" * 72
 
     lines.append(bar)
@@ -97,5 +100,5 @@ def build_report(hierarchy, trace_name=None):
     return "\n".join(lines)
 
 
-def print_report(hierarchy, trace_name=None):
+def print_report(hierarchy: Hierarchy, trace_name: str | None = None) -> None:
     print(build_report(hierarchy, trace_name))
