@@ -53,13 +53,21 @@ class Cache:
     rng_seed      : seed for the random policy.
     """
 
-    def __init__(self, name: str, size: int, block_size: int,
-                 associativity: int, policy: str = "lru",
-                 track_3c: bool = True, rng_seed: int = 0) -> None:
+    def __init__(
+        self,
+        name: str,
+        size: int,
+        block_size: int,
+        associativity: int,
+        policy: str = "lru",
+        track_3c: bool = True,
+        rng_seed: int = 0,
+    ) -> None:
         if size % (block_size * associativity) != 0:
             raise ValueError(
                 f"{name}: size {size} must be a multiple of "
-                f"block_size*associativity ({block_size * associativity})")
+                f"block_size*associativity ({block_size * associativity})"
+            )
 
         self.name = name
         self.size = size
@@ -71,12 +79,11 @@ class Cache:
 
         rng = random.Random(rng_seed)
         try:
-            self.policy: ReplacementPolicy = POLICIES[policy](
-                self.num_sets, associativity, rng)
+            self.policy: ReplacementPolicy = POLICIES[policy](self.num_sets, associativity, rng)
         except KeyError:
             raise ValueError(
-                f"unknown replacement policy {policy!r}; "
-                f"choose from {sorted(POLICIES)}") from None
+                f"unknown replacement policy {policy!r}; choose from {sorted(POLICIES)}"
+            ) from None
 
         # Cache contents, indexed [set][way].
         self._valid = [[False] * associativity for _ in range(self.num_sets)]
@@ -91,14 +98,14 @@ class Cache:
         self.write_hits = 0
         self.write_misses = 0
         self.evictions = 0
-        self.writebacks = 0          # dirty blocks pushed out on eviction
+        self.writebacks = 0  # dirty blocks pushed out on eviction
 
         # --- 3-C classification machinery ----------------------------------
         self.track_3c = track_3c
         self.compulsory_misses = 0
         self.capacity_misses = 0
         self.conflict_misses = 0
-        self._seen_blocks: set[int] = set()    # every block number ever touched
+        self._seen_blocks: set[int] = set()  # every block number ever touched
         # Shadow fully-associative LRU cache of the same capacity:
         # an OrderedDict of block numbers, oldest first.
         self._shadow: OrderedDict[int, bool] = OrderedDict()
@@ -161,7 +168,7 @@ class Cache:
             way = self.policy.victim(set_idx)
             self.evictions += 1
             if self._dirty[set_idx][way]:
-                self.writebacks += 1   # modified data must be written down
+                self.writebacks += 1  # modified data must be written down
 
         valid[way] = True
         tags[way] = tag
@@ -189,11 +196,11 @@ class Cache:
         """Feed the same reference to the shadow fully-associative LRU cache."""
         self._seen_blocks.add(block)
         if block in self._shadow:
-            self._shadow.move_to_end(block)        # refresh LRU position
+            self._shadow.move_to_end(block)  # refresh LRU position
         else:
             self._shadow[block] = True
             if len(self._shadow) > self.num_blocks:
-                self._shadow.popitem(last=False)   # evict shadow's LRU block
+                self._shadow.popitem(last=False)  # evict shadow's LRU block
 
     # -- derived stats ----------------------------------------------------------
 

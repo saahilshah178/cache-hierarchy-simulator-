@@ -192,9 +192,10 @@ Everything is registered by name in `cache.POLICIES`:
 
 ```python
 class MyPolicy(ReplacementPolicy):
-    def on_hit(self, set_idx, way): ...   # an access hit this way
+    def on_hit(self, set_idx, way): ...  # an access hit this way
     def on_fill(self, set_idx, way): ...  # a new block landed in this way
-    def victim(self, set_idx): ...        # set is full: pick a way to evict
+    def victim(self, set_idx): ...  # set is full: pick a way to evict
+
 
 POLICIES["mine"] = MyPolicy
 ```

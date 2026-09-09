@@ -39,8 +39,7 @@ ASSOCIATIVITIES = [1, 2, 4, 8, 16]
 SIZES_KB = [1, 2, 4, 8, 16, 32, 64]
 
 
-def run_single_level(trace, size, block_size, associativity, policy,
-                     hit_time, mem_time):
+def run_single_level(trace, size, block_size, associativity, policy, hit_time, mem_time):
     """Simulate `trace` (a list of (addr, is_write)) through one cache level.
 
     Returns (miss_rate, amat, cache) for that configuration.
@@ -53,50 +52,60 @@ def run_single_level(trace, size, block_size, associativity, policy,
 
 
 def sweep_associativity(trace, size, block_size, policy, hit_time, mem_time):
-    print(f"\n=== associativity sweep (size fixed at {size // 1024} KB, "
-          f"{policy.upper()}) ===")
-    print(f"{'ways':>5} {'miss rate':>10} {'AMAT':>8}   "
-          f"{'compulsory':>10} {'capacity':>9} {'conflict':>9}")
+    print(f"\n=== associativity sweep (size fixed at {size // 1024} KB, {policy.upper()}) ===")
+    print(
+        f"{'ways':>5} {'miss rate':>10} {'AMAT':>8}   "
+        f"{'compulsory':>10} {'capacity':>9} {'conflict':>9}"
+    )
     results = []
     for ways in ASSOCIATIVITIES:
         miss_rate, amat, c = run_single_level(
-            trace, size, block_size, ways, policy, hit_time, mem_time)
+            trace, size, block_size, ways, policy, hit_time, mem_time
+        )
         results.append((ways, miss_rate))
-        print(f"{ways:>5} {miss_rate:>9.2%} {amat:>8.2f}   "
-              f"{c.compulsory_misses:>10,} {c.capacity_misses:>9,} "
-              f"{c.conflict_misses:>9,}")
+        print(
+            f"{ways:>5} {miss_rate:>9.2%} {amat:>8.2f}   "
+            f"{c.compulsory_misses:>10,} {c.capacity_misses:>9,} "
+            f"{c.conflict_misses:>9,}"
+        )
     return results
 
 
 def sweep_size(trace, associativity, block_size, policy, hit_time, mem_time):
-    print(f"\n=== size sweep (associativity fixed at {associativity}-way, "
-          f"{policy.upper()}) ===")
-    print(f"{'size':>7} {'miss rate':>10} {'AMAT':>8}   "
-          f"{'compulsory':>10} {'capacity':>9} {'conflict':>9}")
+    print(f"\n=== size sweep (associativity fixed at {associativity}-way, {policy.upper()}) ===")
+    print(
+        f"{'size':>7} {'miss rate':>10} {'AMAT':>8}   "
+        f"{'compulsory':>10} {'capacity':>9} {'conflict':>9}"
+    )
     results = []
     for kb in SIZES_KB:
         miss_rate, amat, c = run_single_level(
-            trace, kb * 1024, block_size, associativity, policy,
-            hit_time, mem_time)
+            trace, kb * 1024, block_size, associativity, policy, hit_time, mem_time
+        )
         results.append((kb, miss_rate))
-        print(f"{kb:>4} KB {miss_rate:>9.2%} {amat:>8.2f}   "
-              f"{c.compulsory_misses:>10,} {c.capacity_misses:>9,} "
-              f"{c.conflict_misses:>9,}")
+        print(
+            f"{kb:>4} KB {miss_rate:>9.2%} {amat:>8.2f}   "
+            f"{c.compulsory_misses:>10,} {c.capacity_misses:>9,} "
+            f"{c.conflict_misses:>9,}"
+        )
     return results
 
 
-def plot(assoc_results, size_results, assoc_trace, size_trace,
-         fixed_size, fixed_assoc, out_dir="plots"):
+def plot(
+    assoc_results, size_results, assoc_trace, size_trace, fixed_size, fixed_assoc, out_dir="plots"
+):
     """Save the two miss-rate plots. Skipped (with a note) if matplotlib
     is not installed — the tables above still tell the story."""
     try:
         import matplotlib
-        matplotlib.use("Agg")           # no display needed
+
+        matplotlib.use("Agg")  # no display needed
         import matplotlib.pyplot as plt
         from matplotlib.ticker import ScalarFormatter
     except ImportError:
-        print("\n(matplotlib not installed — skipping plots. "
-              "`pip install matplotlib` to get them.)")
+        print(
+            "\n(matplotlib not installed — skipping plots. `pip install matplotlib` to get them.)"
+        )
         return
 
     os.makedirs(out_dir, exist_ok=True)
@@ -105,12 +114,14 @@ def plot(assoc_results, size_results, assoc_trace, size_trace,
         return os.path.splitext(os.path.basename(path))[0]
 
     for results, xlabel, fixed_desc, trace_name, kind in [
-        (assoc_results, "associativity (ways)",
-         f"size fixed at {fixed_size // 1024} KB",
-         assoc_trace, "associativity"),
-        (size_results, "cache size (KB)",
-         f"{fixed_assoc}-way fixed",
-         size_trace, "size"),
+        (
+            assoc_results,
+            "associativity (ways)",
+            f"size fixed at {fixed_size // 1024} KB",
+            assoc_trace,
+            "associativity",
+        ),
+        (size_results, "cache size (KB)", f"{fixed_assoc}-way fixed", size_trace, "size"),
     ]:
         base = trace_base(trace_name)
         xs = [r[0] for r in results]
@@ -135,24 +146,37 @@ def plot(assoc_results, size_results, assoc_trace, size_trace,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Sweep cache associativity and size; plot miss rates.")
-    parser.add_argument("trace", nargs="?", default=None,
-                        help="trace file for BOTH sweeps (default: "
-                             "conflict.trace for the associativity sweep, "
-                             "matmul_naive.trace for the size sweep)")
-    parser.add_argument("--size", type=int, default=8 * 1024,
-                        help="fixed size in bytes for the associativity sweep "
-                             "(default 8192 = 8 KB)")
-    parser.add_argument("--assoc", type=int, default=4,
-                        help="fixed associativity for the size sweep (default 4)")
-    parser.add_argument("--block-size", type=int, default=64,
-                        help="block size in bytes (default 64)")
-    parser.add_argument("--policy", default="lru", choices=sorted(POLICIES),
-                        help="replacement policy (default lru)")
-    parser.add_argument("--hit-time", type=int, default=4,
-                        help="cache hit time in cycles (default 4)")
-    parser.add_argument("--mem-time", type=int, default=100,
-                        help="memory access time in cycles (default 100)")
+        description="Sweep cache associativity and size; plot miss rates."
+    )
+    parser.add_argument(
+        "trace",
+        nargs="?",
+        default=None,
+        help="trace file for BOTH sweeps (default: "
+        "conflict.trace for the associativity sweep, "
+        "matmul_naive.trace for the size sweep)",
+    )
+    parser.add_argument(
+        "--size",
+        type=int,
+        default=8 * 1024,
+        help="fixed size in bytes for the associativity sweep (default 8192 = 8 KB)",
+    )
+    parser.add_argument(
+        "--assoc", type=int, default=4, help="fixed associativity for the size sweep (default 4)"
+    )
+    parser.add_argument(
+        "--block-size", type=int, default=64, help="block size in bytes (default 64)"
+    )
+    parser.add_argument(
+        "--policy", default="lru", choices=sorted(POLICIES), help="replacement policy (default lru)"
+    )
+    parser.add_argument(
+        "--hit-time", type=int, default=4, help="cache hit time in cycles (default 4)"
+    )
+    parser.add_argument(
+        "--mem-time", type=int, default=100, help="memory access time in cycles (default 100)"
+    )
     args = parser.parse_args(argv)
 
     # Validate the fixed knobs against every point we are about to sweep,
@@ -163,35 +187,35 @@ def main(argv=None) -> int:
             parser.error(
                 f"--size {args.size} is not a multiple of "
                 f"block_size*ways ({args.block_size}*{ways}); "
-                "pick a power-of-two size")
+                "pick a power-of-two size"
+            )
     for kb in SIZES_KB:
         if (kb * 1024) % (args.block_size * args.assoc):
             parser.error(
                 f"size {kb} KB is not a multiple of block_size*--assoc "
                 f"({args.block_size}*{args.assoc}); "
-                "pick a power-of-two associativity")
+                "pick a power-of-two associativity"
+            )
 
     assoc_trace_path = args.trace or "traces/conflict.trace"
     size_trace_path = args.trace or "traces/matmul_naive.trace"
 
     # Parse each trace once; every sweep point replays the same access list.
     assoc_trace = list(parse_trace(assoc_trace_path))
-    print(f"associativity sweep trace: {assoc_trace_path} "
-          f"({len(assoc_trace):,} accesses)")
+    print(f"associativity sweep trace: {assoc_trace_path} ({len(assoc_trace):,} accesses)")
     assoc_results = sweep_associativity(
-        assoc_trace, args.size, args.block_size, args.policy,
-        args.hit_time, args.mem_time)
+        assoc_trace, args.size, args.block_size, args.policy, args.hit_time, args.mem_time
+    )
 
-    size_trace = (assoc_trace if size_trace_path == assoc_trace_path
-                  else list(parse_trace(size_trace_path)))
-    print(f"\nsize sweep trace: {size_trace_path} "
-          f"({len(size_trace):,} accesses)")
+    size_trace = (
+        assoc_trace if size_trace_path == assoc_trace_path else list(parse_trace(size_trace_path))
+    )
+    print(f"\nsize sweep trace: {size_trace_path} ({len(size_trace):,} accesses)")
     size_results = sweep_size(
-        size_trace, args.assoc, args.block_size, args.policy,
-        args.hit_time, args.mem_time)
+        size_trace, args.assoc, args.block_size, args.policy, args.hit_time, args.mem_time
+    )
 
-    plot(assoc_results, size_results, assoc_trace_path, size_trace_path,
-         args.size, args.assoc)
+    plot(assoc_results, size_results, assoc_trace_path, size_trace_path, args.size, args.assoc)
     return 0
 
 

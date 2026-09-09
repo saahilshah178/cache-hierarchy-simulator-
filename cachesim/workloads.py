@@ -33,8 +33,8 @@ import os
 import random
 from collections.abc import Callable, Iterable, Iterator
 
-WORD = 8          # 8-byte (double / pointer) accesses
-BLOCK = 64        # cache-block size the patterns are designed around
+WORD = 8  # 8-byte (double / pointer) accesses
+BLOCK = 64  # cache-block size the patterns are designed around
 
 Access = tuple[int, str]
 
@@ -49,8 +49,9 @@ def sequential(buffer_bytes: int = 256 * 1024, passes: int = 2) -> Iterator[Acce
             i += 1
 
 
-def random_access(region_bytes: int = 16 * 1024 * 1024, n: int = 60_000,
-                  seed: int = 1) -> Iterator[Access]:
+def random_access(
+    region_bytes: int = 16 * 1024 * 1024, n: int = 60_000, seed: int = 1
+) -> Iterator[Access]:
     """Uniformly random word-aligned accesses over a large region; 25% writes."""
     rng = random.Random(seed)
     base = 0x1000_0000
@@ -59,9 +60,18 @@ def random_access(region_bytes: int = 16 * 1024 * 1024, n: int = 60_000,
         yield addr, "W" if rng.random() < 0.25 else "R"
 
 
-def _matmul_accesses(n: int, a_base: int, b_base: int, c_base: int,
-                     i0: int, i1: int, j0: int, j1: int,
-                     k0: int, k1: int) -> Iterator[Access]:
+def _matmul_accesses(
+    n: int,
+    a_base: int,
+    b_base: int,
+    c_base: int,
+    i0: int,
+    i1: int,
+    j0: int,
+    j1: int,
+    k0: int,
+    k1: int,
+) -> Iterator[Access]:
     """Emit the accesses for one (i,j,k) sub-block of C += A x B.
 
     Row-major layout: element [r][c] lives at base + (r*n + c) * WORD.
@@ -88,13 +98,12 @@ def matmul(n: int = 64, tile: int | None = None) -> Iterator[Access]:
     for i0 in range(0, n, tile):
         for j0 in range(0, n, tile):
             for k0 in range(0, n, tile):
-                yield from _matmul_accesses(
-                    n, a, b, c,
-                    i0, i0 + tile, j0, j0 + tile, k0, k0 + tile)
+                yield from _matmul_accesses(n, a, b, c, i0, i0 + tile, j0, j0 + tile, k0, k0 + tile)
 
 
-def conflict_streams(streams: int = 4, words_per_stream: int = 16_384,
-                     align: int = 0x0010_0000) -> Iterator[Access]:
+def conflict_streams(
+    streams: int = 4, words_per_stream: int = 16_384, align: int = 0x0010_0000
+) -> Iterator[Access]:
     """Read ``streams`` arrays in lockstep: a[0], b[0], c[0], d[0], a[1], ...
 
     The arrays are placed ``align`` bytes apart (1 MB = 16384 blocks), so
@@ -108,8 +117,9 @@ def conflict_streams(streams: int = 4, words_per_stream: int = 16_384,
             yield base + s * align + i * WORD, "R"
 
 
-def pointer_chase(nodes: int = 16_384, node_bytes: int = BLOCK,
-                  hops: int = 60_000, seed: int = 2) -> Iterator[Access]:
+def pointer_chase(
+    nodes: int = 16_384, node_bytes: int = BLOCK, hops: int = 60_000, seed: int = 2
+) -> Iterator[Access]:
     """Walk a random-permutation linked list: each hop reads the next pointer.
 
     The nodes form one cycle covering ``nodes * node_bytes`` (1 MB) in
@@ -153,8 +163,9 @@ def write_trace(path: str, accesses: Iterable[Access]) -> int:
     return count
 
 
-def write_sample_traces(out_dir: str, names: Iterable[str] | None = None,
-                        verbose: bool = True) -> dict[str, int]:
+def write_sample_traces(
+    out_dir: str, names: Iterable[str] | None = None, verbose: bool = True
+) -> dict[str, int]:
     """Generate the sample traces into ``out_dir``; returns name -> access count."""
     os.makedirs(out_dir, exist_ok=True)
     counts: dict[str, int] = {}

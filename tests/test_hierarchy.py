@@ -12,20 +12,20 @@ from cachesim.hierarchy import Hierarchy, Level
 
 class TestHierarchy(unittest.TestCase):
     def make(self) -> Hierarchy:
-        l1 = Cache("L1", 256, 64, 1)           # 4 blocks
-        l2 = Cache("L2", 1024, 64, 2)          # 16 blocks
+        l1 = Cache("L1", 256, 64, 1)  # 4 blocks
+        l2 = Cache("L2", 1024, 64, 2)  # 16 blocks
         return Hierarchy([Level(l1, 4), Level(l2, 12)], memory_access_time=100)
 
     def test_miss_path_timing(self) -> None:
         h = self.make()
-        self.assertEqual(h.access(0x0), 4 + 12 + 100)   # miss, miss, DRAM
-        self.assertEqual(h.access(0x0), 4)              # now an L1 hit
+        self.assertEqual(h.access(0x0), 4 + 12 + 100)  # miss, miss, DRAM
+        self.assertEqual(h.access(0x0), 4)  # now an L1 hit
         # Blocks 4, 12, 20, 28 all alias to L1 set 0 (4 sets, direct-mapped)
         # and evict block 0 from L1, but they land in L2 set 4 (8 sets),
         # leaving block 0 untouched in L2 set 0.
         for blk in (4, 12, 20, 28):
             h.access(blk * 64)
-        self.assertEqual(h.access(0x0), 4 + 12)         # L1 evicted it; L2 has it
+        self.assertEqual(h.access(0x0), 4 + 12)  # L1 evicted it; L2 has it
 
     def test_l2_only_sees_l1_misses(self) -> None:
         h = self.make()

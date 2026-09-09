@@ -21,8 +21,7 @@ import random
 class ReplacementPolicy:
     """Base class. Tracks nothing; subclasses add per-set state."""
 
-    def __init__(self, num_sets: int, num_ways: int,
-                 rng: random.Random | None = None) -> None:
+    def __init__(self, num_sets: int, num_ways: int, rng: random.Random | None = None) -> None:
         self.num_sets = num_sets
         self.num_ways = num_ways
         self.rng = rng if rng is not None else random.Random(0)
@@ -46,8 +45,7 @@ class LRUPolicy(ReplacementPolicy):
     way at the least-recent front.
     """
 
-    def __init__(self, num_sets: int, num_ways: int,
-                 rng: random.Random | None = None) -> None:
+    def __init__(self, num_sets: int, num_ways: int, rng: random.Random | None = None) -> None:
         super().__init__(num_sets, num_ways, rng)
         self._order = [list(range(num_ways)) for _ in range(num_sets)]
 
@@ -69,8 +67,7 @@ class FIFOPolicy(ReplacementPolicy):
     Hits do not refresh a block's position; only being loaded does.
     """
 
-    def __init__(self, num_sets: int, num_ways: int,
-                 rng: random.Random | None = None) -> None:
+    def __init__(self, num_sets: int, num_ways: int, rng: random.Random | None = None) -> None:
         super().__init__(num_sets, num_ways, rng)
         self._order = [list(range(num_ways)) for _ in range(num_sets)]
 

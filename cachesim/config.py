@@ -9,14 +9,32 @@ from typing import Any
 #: The default hierarchy: sizes, latencies, and shapes typical of a modern
 #: desktop core. Copy this into a .json file and edit to experiment.
 DEFAULT_CONFIG: dict[str, Any] = {
-    "memory_access_time": 100,     # cycles to reach DRAM
+    "memory_access_time": 100,  # cycles to reach DRAM
     "levels": [
-        {"name": "L1", "size": 32 * 1024,   "block_size": 64,
-         "associativity": 4,  "policy": "lru", "hit_time": 4},
-        {"name": "L2", "size": 256 * 1024,  "block_size": 64,
-         "associativity": 8,  "policy": "lru", "hit_time": 12},
-        {"name": "L3", "size": 2 * 1024 * 1024, "block_size": 64,
-         "associativity": 16, "policy": "lru", "hit_time": 40},
+        {
+            "name": "L1",
+            "size": 32 * 1024,
+            "block_size": 64,
+            "associativity": 4,
+            "policy": "lru",
+            "hit_time": 4,
+        },
+        {
+            "name": "L2",
+            "size": 256 * 1024,
+            "block_size": 64,
+            "associativity": 8,
+            "policy": "lru",
+            "hit_time": 12,
+        },
+        {
+            "name": "L3",
+            "size": 2 * 1024 * 1024,
+            "block_size": 64,
+            "associativity": 16,
+            "policy": "lru",
+            "hit_time": 40,
+        },
     ],
 }
 

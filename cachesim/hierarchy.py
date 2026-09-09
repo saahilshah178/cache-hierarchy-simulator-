@@ -63,8 +63,8 @@ class Hierarchy:
         self.accesses = 0
         self.reads = 0
         self.writes = 0
-        self.memory_accesses = 0     # accesses that fell all the way to DRAM
-        self.total_time = 0          # simulated cycles spent on all accesses
+        self.memory_accesses = 0  # accesses that fell all the way to DRAM
+        self.total_time = 0  # simulated cycles spent on all accesses
 
     # -- construction helper --------------------------------------------------
 
@@ -112,12 +112,12 @@ class Hierarchy:
 
         time = 0
         for i, level in enumerate(self.levels):
-            time += level.hit_time            # pay to probe this level
+            time += level.hit_time  # pay to probe this level
             # Only the first level sees the write intent: with write-back
             # caches, a store that misses L1 asks the levels below for the
             # line (a read); the data itself is only modified in L1.
             if level.cache.access(addr, is_write and i == 0):
-                self.total_time += time       # hit here: done
+                self.total_time += time  # hit here: done
                 return time
 
         # Missed every level: fetch from DRAM. The fills into each level
