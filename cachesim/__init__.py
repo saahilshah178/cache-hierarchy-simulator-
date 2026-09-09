@@ -14,7 +14,8 @@ from cachesim.config import (
 )
 from cachesim.hierarchy import Hierarchy, Level
 from cachesim.policies import POLICIES, ReplacementPolicy
-from cachesim.report import build_report, print_report
+from cachesim.report import build_report, format_report, print_report
+from cachesim.stats import HierarchyStats, LevelStats, ThreeCStats
 from cachesim.trace import parse_trace
 
 __version__ = "0.9.0"
@@ -27,11 +28,15 @@ __all__ = [
     "ConfigError",
     "Hierarchy",
     "HierarchySpec",
+    "HierarchyStats",
     "Level",
+    "LevelStats",
     "ReplacementPolicy",
+    "ThreeCStats",
     "__version__",
     "build_report",
     "default_config",
+    "format_report",
     "load_config",
     "parse_config",
     "parse_trace",

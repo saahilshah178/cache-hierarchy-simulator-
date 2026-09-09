@@ -47,6 +47,7 @@ from typing import Any
 
 from cachesim.cache import Cache, Evicted
 from cachesim.config import ConfigError, HierarchySpec, parse_config
+from cachesim.stats import HierarchyStats, collect
 
 
 class Level:
@@ -205,6 +206,10 @@ class Hierarchy:
         return self.dram_writes - before
 
     # -- metrics -------------------------------------------------------------
+
+    def stats(self) -> HierarchyStats:
+        """Snapshot every counter and derived metric (see ``cachesim.stats``)."""
+        return collect(self)
 
     @property
     def memory_accesses(self) -> int:

@@ -28,7 +28,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         sys.exit(f"error: {exc}")
     if hierarchy.accesses == 0:
         sys.exit(f"error: no accesses found in {args.trace}")
-    print_report(hierarchy, trace_name=args.trace)
+    if args.format == "json":
+        print(json.dumps(hierarchy.stats().to_dict(), indent=2))
+    else:
+        print_report(hierarchy, trace_name=args.trace)
     return 0
 
 
@@ -57,6 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         metavar="FILE",
         help="JSON hierarchy config (default: built-in L1/L2/L3 config, see configs/default.json)",
+    )
+    p_run.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="report format: human-readable text (default) or JSON",
     )
     p_run.set_defaults(func=_cmd_run)
 

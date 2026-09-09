@@ -1,12 +1,15 @@
-"""Turns a simulated Hierarchy into a human-readable report.
+"""Renders a ``HierarchyStats`` snapshot as a human-readable text report.
 
 Everything here is presentation: per-level hit/miss tables, local and global
-miss rates, the 3-C miss breakdown, and AMAT.
+miss rates, the miss classification, and AMAT.
 """
 
 from __future__ import annotations
 
 from cachesim.hierarchy import Hierarchy
+from cachesim.stats import HierarchyStats
+
+BAR = "=" * 72
 
 
 def _pct(part: float, whole: float) -> str:
@@ -23,90 +26,83 @@ def _size_str(nbytes: int) -> str:
     return f"{nbytes} B"
 
 
-def build_report(hierarchy: Hierarchy, trace_name: str | None = None) -> str:
-    """Return the full multi-line report string for a finished simulation."""
-    h = hierarchy
-    lines: list[str] = []
-    bar = "=" * 72
-
-    lines.append(bar)
+def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
+    """Return the full multi-line report for a statistics snapshot."""
+    s = stats
+    lines: list[str] = [BAR]
     title = "CACHE HIERARCHY SIMULATION REPORT"
     if trace_name:
         title += f"  ({trace_name})"
     lines.append(title)
-    lines.append(bar)
-    lines.append(f"Total accesses : {h.accesses:>12,}   (reads {h.reads:,} / writes {h.writes:,})")
+    lines.append(BAR)
+    lines.append(f"Total accesses : {s.accesses:>12,}   (reads {s.reads:,} / writes {s.writes:,})")
     lines.append(
-        f"DRAM reads     : {h.dram_reads:>12,}"
-        f"   ({_pct(h.dram_reads, h.accesses).strip()} of all accesses missed every level)"
+        f"DRAM reads     : {s.dram_reads:>12,}"
+        f"   ({_pct(s.dram_reads, s.accesses).strip()} of all accesses missed every level)"
     )
     lines.append(
-        f"DRAM writes    : {h.dram_writes:>12,}"
-        f"   (dirty lines written back from {h.levels[-1].cache.name})"
+        f"DRAM writes    : {s.dram_writes:>12,}"
+        f"   (dirty lines written back from {s.levels[-1].name})"
     )
     lines.append("")
 
-    # --- per-level detail ---------------------------------------------------
-    for i, level in enumerate(h.levels):
-        c = level.cache
+    for i, lv in enumerate(s.levels):
         lines.append(
-            f"--- {c.name}: {_size_str(c.size)}, "
-            f"{c.block_size} B blocks, {c.associativity}-way, "
-            f"{c.policy_name.upper()}, hit time {level.hit_time} cyc ---"
+            f"--- {lv.name}: {_size_str(lv.size)}, {lv.block_size} B blocks, "
+            f"{lv.associativity}-way, {lv.policy.upper()}, hit time {lv.hit_time} cyc ---"
         )
-        lines.append(f"  accesses    : {c.accesses:>12,}")
+        lines.append(f"  accesses    : {lv.accesses:>12,}")
         lines.append(
-            f"  hits        : {c.hits:>12,}   (reads {c.read_hits:,} / writes {c.write_hits:,})"
+            f"  hits        : {lv.hits:>12,}   (reads {lv.read_hits:,} / writes {lv.write_hits:,})"
         )
         lines.append(
-            f"  misses      : {c.misses:>12,}   "
-            f"(reads {c.read_misses:,} / writes {c.write_misses:,})"
+            f"  misses      : {lv.misses:>12,}   "
+            f"(reads {lv.read_misses:,} / writes {lv.write_misses:,})"
         )
         lines.append(
-            f"  local miss rate  : {_pct(c.misses, c.accesses)}"
+            f"  local miss rate  : {_pct(lv.misses, lv.accesses)}"
             "   (misses / accesses that reached this level)"
         )
         lines.append(
-            f"  global miss rate : {100 * h.global_miss_rate(i):6.2f}%"
-            "   (misses / all CPU accesses)"
+            f"  global miss rate : {100 * lv.global_miss_rate:6.2f}%   (misses / all CPU accesses)"
         )
         lines.append(
-            f"  evictions   : {c.evictions:>12,}   (writebacks of dirty blocks: {c.writebacks:,})"
+            f"  evictions   : {lv.evictions:>12,}   (writebacks of dirty blocks: {lv.writebacks:,})"
         )
         if i > 0:
             lines.append(
-                f"  writebacks received : {c.writebacks_received:>6,}"
-                f"   (from {h.levels[i - 1].cache.name}; "
-                f"{c.writeback_allocations:,} allocated a line)"
+                f"  writebacks received : {lv.writebacks_received:>6,}"
+                f"   (from {s.levels[i - 1].name}; {lv.writeback_allocations:,} allocated a line)"
             )
-        if c.track_3c and c.misses:
+        c3 = lv.three_c
+        if c3 is not None and lv.misses:
             lines.append(f"  miss classification     {'per-reference':>14} {'aggregate':>12}")
+            lines.append(f"    compulsory            {c3.compulsory:>14,} {c3.compulsory:>12,}")
             lines.append(
-                f"    compulsory            {c.compulsory_misses:>14,} {c.compulsory_misses:>12,}"
+                f"    capacity              {c3.capacity:>14,} {c3.capacity_aggregate:>12,}"
             )
             lines.append(
-                f"    capacity              {c.capacity_misses:>14,}"
-                f" {c.capacity_misses_aggregate:>12,}"
+                f"    conflict              {c3.conflict:>14,} {c3.conflict_aggregate:>12,}"
             )
             lines.append(
-                f"    conflict              {c.conflict_misses:>14,}"
-                f" {c.conflict_misses_aggregate:>12,}"
-            )
-            lines.append(
-                f"    fully-associative LRU misses: {c.shadow_misses:,}"
-                f"   hits it would have missed: {c.anti_conflict_hits:,}"
+                f"    fully-associative LRU misses: {c3.shadow_misses:,}"
+                f"   hits it would have missed: {c3.anti_conflict_hits:,}"
             )
         lines.append("")
 
-    # --- headline numbers -----------------------------------------------------
-    lines.append(bar)
-    lines.append(f"AMAT (analytic formula) : {h.amat():8.3f} cycles")
+    lines.append(BAR)
+    lines.append(f"AMAT (analytic formula) : {s.amat:8.3f} cycles")
     lines.append(
-        f"AMAT (measured)         : {h.measured_amat():8.3f} cycles"
-        f"   ({h.total_time:,} cycles / {h.accesses:,} accesses)"
+        f"AMAT (measured)         : {s.measured_amat:8.3f} cycles"
+        f"   ({s.total_cycles:,} cycles / {s.accesses:,} accesses)"
     )
-    lines.append(bar)
+    lines.append(BAR)
     return "\n".join(lines)
+
+
+def build_report(hierarchy: Hierarchy, trace_name: str | None = None) -> str:
+    """Return the full multi-line report string for a finished simulation."""
+    return format_report(hierarchy.stats(), trace_name)
 
 
 def print_report(hierarchy: Hierarchy, trace_name: str | None = None) -> None:
