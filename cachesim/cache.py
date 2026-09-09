@@ -29,17 +29,30 @@ into miss handling, write-backs, back-invalidation, and prefetching:
 ``access(addr, is_write)`` is ``probe`` followed by ``allocate`` on a miss,
 for single-level use.
 
-Optionally every miss is classified into the three Cs:
+Optionally misses are classified into the three Cs by running a shadow
+fully-associative LRU cache of identical capacity alongside the real one.
+Two taxonomies are kept, because they differ:
+
+Per-reference labels (``compulsory_misses``, ``capacity_misses``,
+``conflict_misses``) classify each miss as it happens:
 
 * compulsory -- the first reference to this block.
-* capacity   -- a fully-associative LRU cache of the same capacity would also
-                have missed.
-* conflict   -- the fully-associative twin would have hit, so the miss is
-                due to the set mapping (or, for non-LRU policies, to the
+* capacity   -- the shadow cache had already evicted the block.
+* conflict   -- the shadow cache still holds the block, so the miss is due
+                to the set mapping (or, for non-LRU policies, to the
                 replacement choice).
 
-Classification runs a shadow fully-associative LRU cache of identical
-capacity alongside the real one and compares outcomes.
+The aggregate decomposition of Hill and Smith (1989), also used by Hennessy
+and Patterson, is defined on totals rather than individual references:
+
+* capacity (aggregate) = shadow misses - compulsory misses
+* conflict (aggregate) = misses - shadow misses
+
+The two agree unless some reference hits the set-associative cache while
+missing the shadow cache (``anti_conflict_hits``): each such reference
+adds one to per-reference conflict and subtracts one from per-reference
+capacity relative to the aggregate figures, and aggregate conflict can be
+negative when the set mapping happens to beat fully-associative LRU.
 
 Dirty tracking implements write-back semantics: a write marks the line
 dirty, and evicting or invalidating a dirty line counts as a write-back.
@@ -160,6 +173,8 @@ class Cache:
         self.compulsory_misses = 0
         self.capacity_misses = 0
         self.conflict_misses = 0
+        self.shadow_misses = 0  # misses of the fully-associative LRU twin
+        self.anti_conflict_hits = 0  # hits here that the twin would have missed
         self._seen_blocks: set[int] = set()  # every block number ever touched
         # Shadow fully-associative LRU cache of the same capacity:
         # an OrderedDict of block numbers, oldest first.
@@ -201,8 +216,8 @@ class Cache:
                 else:
                     self.read_hits += 1
                 self.policy.on_hit(set_idx, way, block)
-                if self.track_3c:
-                    self._update_shadow(block)
+                if self.track_3c and not self._update_shadow(block):
+                    self.anti_conflict_hits += 1
                 return True
 
         self.misses += 1
@@ -343,21 +358,38 @@ class Cache:
             # evicted it: the working set is too large.
             self.capacity_misses += 1
 
-    def _update_shadow(self, block: int) -> None:
-        """Feed the same reference to the shadow fully-associative LRU cache."""
+    def _update_shadow(self, block: int) -> bool:
+        """Feed the same reference to the shadow fully-associative LRU cache.
+
+        Returns True if the shadow cache hit.
+        """
         self._seen_blocks.add(block)
         if block in self._shadow:
             self._shadow.move_to_end(block)  # refresh LRU position
-        else:
-            self._shadow[block] = True
-            if len(self._shadow) > self.num_blocks:
-                self._shadow.popitem(last=False)  # evict shadow's LRU block
+            return True
+        self.shadow_misses += 1
+        self._shadow[block] = True
+        if len(self._shadow) > self.num_blocks:
+            self._shadow.popitem(last=False)  # evict shadow's LRU block
+        return False
 
     # -- derived stats ----------------------------------------------------------
 
     @property
     def accesses(self) -> int:
         return self.hits + self.misses
+
+    @property
+    def capacity_misses_aggregate(self) -> int:
+        """Hill-Smith capacity misses: shadow (fully-associative LRU) misses
+        that are not compulsory."""
+        return self.shadow_misses - self.compulsory_misses
+
+    @property
+    def conflict_misses_aggregate(self) -> int:
+        """Hill-Smith conflict misses: misses beyond those of the
+        fully-associative LRU twin. Negative if the set mapping did better."""
+        return self.misses - self.shadow_misses
 
     @property
     def miss_rate(self) -> float:

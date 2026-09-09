@@ -218,3 +218,72 @@ class TestPrimitives(unittest.TestCase):
     def test_negative_address_rejected(self) -> None:
         with self.assertRaises(ValueError):
             tiny_cache(ways=1).access(-1)
+
+
+class TestThreeCsAggregate(unittest.TestCase):
+    """The Hill-Smith aggregate decomposition next to the per-reference labels."""
+
+    def test_taxonomies_agree_without_anti_conflict_hits(self) -> None:
+        c = tiny_cache(ways=1, sets=2)  # 2 blocks
+        a, b = block_addr(c, 0, 1), block_addr(c, 0, 2)  # same set
+        for addr in (a, b, a, b):
+            c.access(addr)
+        self.assertEqual(c.anti_conflict_hits, 0)
+        self.assertEqual(c.shadow_misses, 2)
+        self.assertEqual((c.compulsory_misses, c.capacity_misses, c.conflict_misses), (2, 0, 2))
+        self.assertEqual((c.capacity_misses_aggregate, c.conflict_misses_aggregate), (0, 2))
+
+    def test_anti_conflict_hit_makes_aggregate_conflict_negative(self) -> None:
+        """A set-associative cache can beat fully-associative LRU: two sets
+        isolate a hot block from a stream that thrashes the other set."""
+        c = tiny_cache(ways=1, sets=2)  # 2 blocks: set 0 and set 1
+        hot = block_addr(c, 0, 1)
+        stream = [block_addr(c, 1, t) for t in (1, 2, 3)]
+        c.access(hot)
+        for addr in stream:
+            c.access(addr)  # three misses in set 1; FA-LRU (2 blocks) evicts hot
+        self.assertTrue(c.access(hot))  # real cache hits; the shadow misses
+        self.assertEqual(c.anti_conflict_hits, 1)
+        self.assertEqual(c.misses, 4)
+        self.assertEqual(c.shadow_misses, 5)
+        self.assertEqual(c.conflict_misses_aggregate, -1)
+        self.assertEqual(c.capacity_misses_aggregate, 1)
+        # Per-reference labels: 4 compulsory, nothing else.
+        self.assertEqual((c.compulsory_misses, c.capacity_misses, c.conflict_misses), (4, 0, 0))
+
+    def test_identity_between_the_taxonomies(self) -> None:
+        """per-reference conflict - aggregate conflict == anti-conflict hits,
+        and the same difference is subtracted from capacity."""
+        rng = random.Random(11)
+        c = Cache("p", size=2048, block_size=64, associativity=2)
+        for _ in range(20000):
+            c.access(rng.randrange(0, 16 * 1024))
+        self.assertEqual(c.conflict_misses - c.conflict_misses_aggregate, c.anti_conflict_hits)
+        self.assertEqual(c.capacity_misses_aggregate - c.capacity_misses, c.anti_conflict_hits)
+        self.assertEqual(
+            c.compulsory_misses + c.capacity_misses_aggregate + c.conflict_misses_aggregate,
+            c.misses,
+        )
+
+    def test_fully_associative_lru_has_no_conflict_misses(self) -> None:
+        rng = random.Random(5)
+        c = Cache("fa", size=1024, block_size=64, associativity=16)  # one set
+        for _ in range(5000):
+            c.access(rng.randrange(0, 8 * 1024))
+        self.assertEqual(c.conflict_misses, 0)
+        self.assertEqual(c.conflict_misses_aggregate, 0)
+        self.assertEqual(c.anti_conflict_hits, 0)
+        self.assertEqual(c.shadow_misses, c.misses)
+
+    def test_fifo_policy_misses_show_up_as_conflict(self) -> None:
+        """With a non-LRU policy the shadow is still LRU, so replacement
+        choices worse than LRU are labelled conflict even with one set."""
+        c = Cache("fifo", size=4 * 64, block_size=64, associativity=4, policy="fifo")
+        for blk in (0, 1, 2, 3, 0, 4, 0):
+            c.access(blk * 64)
+        # FIFO evicts block 0 when 4 arrives (LRU would evict 1), so the
+        # final access to 0 misses although the LRU twin holds it.
+        self.assertEqual(c.misses, 6)
+        self.assertEqual(c.shadow_misses, 5)
+        self.assertEqual(c.conflict_misses, 1)
+        self.assertEqual(c.conflict_misses_aggregate, 1)

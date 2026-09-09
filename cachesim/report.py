@@ -80,21 +80,21 @@ def build_report(hierarchy: Hierarchy, trace_name: str | None = None) -> str:
                 f"{c.writeback_allocations:,} allocated a line)"
             )
         if c.track_3c and c.misses:
-            lines.append("  miss breakdown (the 3 Cs):")
+            lines.append(f"  miss classification     {'per-reference':>14} {'aggregate':>12}")
             lines.append(
-                f"    compulsory : {c.compulsory_misses:>12,}  "
-                f"{_pct(c.compulsory_misses, c.misses)} of misses"
-                "  (first-ever touch, unavoidable)"
+                f"    compulsory            {c.compulsory_misses:>14,} {c.compulsory_misses:>12,}"
             )
             lines.append(
-                f"    capacity   : {c.capacity_misses:>12,}  "
-                f"{_pct(c.capacity_misses, c.misses)} of misses"
-                "  (working set bigger than the cache)"
+                f"    capacity              {c.capacity_misses:>14,}"
+                f" {c.capacity_misses_aggregate:>12,}"
             )
             lines.append(
-                f"    conflict   : {c.conflict_misses:>12,}  "
-                f"{_pct(c.conflict_misses, c.misses)} of misses"
-                "  (too many blocks fighting over one set)"
+                f"    conflict              {c.conflict_misses:>14,}"
+                f" {c.conflict_misses_aggregate:>12,}"
+            )
+            lines.append(
+                f"    fully-associative LRU misses: {c.shadow_misses:,}"
+                f"   hits it would have missed: {c.anti_conflict_hits:,}"
             )
         lines.append("")
 

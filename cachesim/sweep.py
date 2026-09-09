@@ -73,7 +73,7 @@ def sweep_associativity(
     print(f"\n=== associativity sweep (size fixed at {size // 1024} KB, {policy.upper()}) ===")
     print(
         f"{'ways':>5} {'miss rate':>10} {'AMAT':>8}   "
-        f"{'compulsory':>10} {'capacity':>9} {'conflict':>9}"
+        f"{'compulsory':>10} {'capacity':>9} {'conflict':>9} {'FA-LRU':>9}"
     )
     results: list[tuple[int, float]] = []
     for ways in ASSOCIATIVITIES:
@@ -83,8 +83,8 @@ def sweep_associativity(
         results.append((ways, miss_rate))
         print(
             f"{ways:>5} {miss_rate:>9.2%} {amat:>8.2f}   "
-            f"{c.compulsory_misses:>10,} {c.capacity_misses:>9,} "
-            f"{c.conflict_misses:>9,}"
+            f"{c.compulsory_misses:>10,} {c.capacity_misses_aggregate:>9,} "
+            f"{c.conflict_misses_aggregate:>9,} {c.shadow_misses:>9,}"
         )
     return results
 
@@ -100,7 +100,7 @@ def sweep_size(
     print(f"\n=== size sweep (associativity fixed at {associativity}-way, {policy.upper()}) ===")
     print(
         f"{'size':>7} {'miss rate':>10} {'AMAT':>8}   "
-        f"{'compulsory':>10} {'capacity':>9} {'conflict':>9}"
+        f"{'compulsory':>10} {'capacity':>9} {'conflict':>9} {'FA-LRU':>9}"
     )
     results: list[tuple[int, float]] = []
     for kb in SIZES_KB:
@@ -110,8 +110,8 @@ def sweep_size(
         results.append((kb, miss_rate))
         print(
             f"{kb:>4} KB {miss_rate:>9.2%} {amat:>8.2f}   "
-            f"{c.compulsory_misses:>10,} {c.capacity_misses:>9,} "
-            f"{c.conflict_misses:>9,}"
+            f"{c.compulsory_misses:>10,} {c.capacity_misses_aggregate:>9,} "
+            f"{c.conflict_misses_aggregate:>9,} {c.shadow_misses:>9,}"
         )
     return results
 
