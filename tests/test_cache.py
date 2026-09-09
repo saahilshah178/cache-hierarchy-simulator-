@@ -5,8 +5,10 @@ from __future__ import annotations
 import random
 import unittest
 from typing import Any
+from unittest import mock
 
-from cachesim.cache import Cache
+from cachesim.cache import Cache, Evicted
+from cachesim.policies import POLICIES, ReplacementPolicy
 from tests.helpers import block_addr, tiny_cache
 
 
@@ -146,3 +148,73 @@ class TestWriteback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestPrimitives(unittest.TestCase):
+    """probe / allocate / invalidate, the building blocks of a hierarchy."""
+
+    def test_probe_does_not_fill(self) -> None:
+        c = tiny_cache(ways=1)
+        self.assertFalse(c.probe(5))
+        self.assertFalse(c.contains(5))
+        self.assertEqual((c.misses, c.fills), (1, 0))
+
+    def test_allocate_reports_the_victim(self) -> None:
+        c = tiny_cache(ways=1)
+        self.assertIsNone(c.allocate(0, dirty=True))  # empty way: nothing evicted
+        self.assertEqual(c.allocate(2), Evicted(block=0, dirty=True))  # same set (2 sets)
+        self.assertEqual((c.evictions, c.writebacks, c.fills), (1, 1, 2))
+        self.assertTrue(c.contains(2))
+        self.assertFalse(c.contains(0))
+
+    def test_allocate_of_a_resident_block_is_a_noop(self) -> None:
+        c = tiny_cache(ways=2)
+        c.allocate(0)
+        self.assertIsNone(c.allocate(0, dirty=True))
+        self.assertEqual(c.fills, 1)
+        self.assertTrue(c.is_dirty(0))  # the dirty bit is OR-ed in
+
+    def test_invalidate_frees_the_way_without_calling_victim(self) -> None:
+        class NoVictim(ReplacementPolicy):
+            def victim(self, set_idx: int) -> int:
+                raise AssertionError("victim() called although a way was empty")
+
+        with mock.patch.dict(POLICIES, {"novictim": NoVictim}):
+            c = tiny_cache(ways=2, policy="novictim")
+            c.allocate(0)
+            c.allocate(2, dirty=True)
+            self.assertEqual(c.invalidate(2), Evicted(block=2, dirty=True))
+            self.assertIsNone(c.invalidate(2))  # already gone
+            self.assertFalse(c.contains(2))
+            self.assertEqual((c.invalidations, c.evictions, c.writebacks), (1, 0, 1))
+            self.assertIsNone(c.allocate(4))  # refills the emptied way
+            self.assertEqual(sorted(blk for _, _, blk, _ in c.lines()), [0, 4])
+
+    def test_invalidate_keeps_lru_order_of_the_remaining_ways(self) -> None:
+        c = tiny_cache(ways=4, sets=1)
+        for blk in (0, 1, 2, 3):
+            c.access(blk * c.block_size)
+        c.invalidate(1)  # way 1 is empty; LRU order of the rest is 0, 2, 3
+        c.access(4 * c.block_size)  # takes the empty way, no eviction
+        self.assertEqual(c.evictions, 0)
+        c.access(5 * c.block_size)  # set full: evicts block 0, the true LRU
+        self.assertFalse(c.contains(0))
+        self.assertTrue(c.contains(2))
+
+    def test_mark_dirty_and_lines(self) -> None:
+        c = tiny_cache(ways=2)
+        c.allocate(1)
+        self.assertTrue(c.mark_dirty(1))
+        self.assertFalse(c.mark_dirty(9))
+        self.assertEqual(list(c.lines()), [(1, 0, 1, True)])
+
+    def test_address_helpers(self) -> None:
+        c = Cache("g", size=32 * 1024, block_size=64, associativity=4)
+        blk = c.block_of(0x12345)
+        self.assertEqual(blk, 0x12345 // 64)
+        self.assertEqual(c.set_of(blk), blk % 128)
+        self.assertEqual(c.tag_of(blk), blk // 128)
+
+    def test_negative_address_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            tiny_cache(ways=1).access(-1)

@@ -36,7 +36,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from cachesim.cache import Cache
+from cachesim.cache import Cache, Evicted
 from cachesim.config import ConfigError, HierarchySpec, parse_config
 
 
@@ -58,7 +58,13 @@ class Hierarchy:
     """
 
     def __init__(self, levels: list[Level], memory_access_time: int) -> None:
+        if not levels:
+            raise ValueError("a hierarchy needs at least one cache level")
+        block_sizes = {level.cache.block_size for level in levels}
+        if len(block_sizes) != 1:
+            raise ValueError(f"all levels must share one block size, got {sorted(block_sizes)}")
         self.levels = levels
+        self.block_size = levels[0].cache.block_size
         self.memory_access_time = memory_access_time
 
         # --- statistics ---
@@ -105,29 +111,51 @@ class Hierarchy:
         """Simulate one memory access through the whole hierarchy.
 
         Returns the number of cycles this access took.
+
+        The access probes levels top-down until one hits (or DRAM is
+        reached), then fills the block into every level that missed,
+        bottom-up, handling each eviction those fills cause.
         """
+        if addr < 0:
+            raise ValueError(f"address must be non-negative, got {addr}")
         self.accesses += 1
         if is_write:
             self.writes += 1
         else:
             self.reads += 1
 
+        block = addr // self.block_size
+        levels = self.levels
         time = 0
-        for i, level in enumerate(self.levels):
+        hit_level = len(levels)
+        for i, level in enumerate(levels):
             time += level.hit_time  # pay to probe this level
             # Only the first level sees the write intent: with write-back
             # caches, a store that misses L1 asks the levels below for the
             # line (a read); the data itself is only modified in L1.
-            if level.cache.access(addr, is_write and i == 0):
-                self.total_time += time  # hit here: done
-                return time
+            if level.cache.probe(block, is_write and i == 0):
+                hit_level = i
+                break
+        else:
+            # Missed every level: fetch from DRAM.
+            time += self.memory_access_time
+            self.memory_accesses += 1
 
-        # Missed every level: fetch from DRAM. The fills into each level
-        # already happened inside the Cache.access calls above.
-        time += self.memory_access_time
-        self.memory_accesses += 1
+        # Fill the block into every level above the one that supplied it.
+        for i in range(hit_level - 1, -1, -1):
+            evicted = levels[i].cache.allocate(block, dirty=is_write and i == 0)
+            if evicted is not None:
+                self._handle_eviction(i, evicted)
+
         self.total_time += time
         return time
+
+    def _handle_eviction(self, level_index: int, evicted: Evicted) -> None:
+        """React to a line leaving ``levels[level_index]``.
+
+        Write-backs are counted at the evicting level (``Cache.writebacks``)
+        and not forwarded further down.
+        """
 
     # -- metrics -------------------------------------------------------------
 

@@ -4,15 +4,30 @@ One level of a cache (an L1, an L2, ...) is modelled as a grid of
 ``num_sets`` sets by ``associativity`` ways:
 
 * The cache holds ``size`` bytes, divided into blocks (lines) of
-  ``block_size`` bytes.
-* A memory address maps to exactly one set (``block % num_sets``) and may
-  occupy any way of that set.
+  ``block_size`` bytes. Addresses are converted to block numbers
+  (``addr // block_size``) at the boundary; everything inside works on
+  block numbers.
+* A block maps to exactly one set (``block % num_sets``) and may occupy any
+  way of that set.
 
     - associativity == 1                    -> direct-mapped
     - associativity == blocks in the cache  -> fully associative
     - otherwise                             -> N-way set-associative
 
 * When a set is full, the ``ReplacementPolicy`` chooses the victim.
+
+The level exposes three primitives so that a hierarchy can compose them
+into miss handling, write-backs, back-invalidation, and prefetching:
+
+* ``probe(block, is_write)``  -- look the block up, update hit/miss
+  statistics and replacement state, and classify a miss. Does not fill.
+* ``allocate(block, dirty)``  -- install a block, evicting a victim if the
+  set is full; returns the victim as an ``Evicted`` record.
+* ``invalidate(block)``       -- remove a block on command; returns the
+  removed line so a dirty one can be written back.
+
+``access(addr, is_write)`` is ``probe`` followed by ``allocate`` on a miss,
+for single-level use.
 
 Optionally every miss is classified into the three Cs:
 
@@ -26,16 +41,28 @@ Optionally every miss is classified into the three Cs:
 Classification runs a shadow fully-associative LRU cache of identical
 capacity alongside the real one and compares outcomes.
 
-Writes use write-back, write-allocate semantics: a write miss loads the block
-like a read miss, and dirty blocks are counted as a write-back when evicted.
+Dirty tracking implements write-back semantics: a write marks the line
+dirty, and evicting or invalidating a dirty line counts as a write-back.
 """
 
 from __future__ import annotations
 
 import random
 from collections import OrderedDict
+from collections.abc import Iterator
+from typing import NamedTuple
 
 from cachesim.policies import POLICIES, ReplacementPolicy
+
+#: Block-number sentinel for an empty way. Real block numbers are >= 0.
+EMPTY = -1
+
+
+class Evicted(NamedTuple):
+    """A line removed from a cache by ``allocate`` or ``invalidate``."""
+
+    block: int
+    dirty: bool
 
 
 def _validate_geometry(name: str, size: int, block_size: int, associativity: int) -> None:
@@ -109,9 +136,9 @@ class Cache:
                 f"unknown replacement policy {policy!r}; choose from {sorted(POLICIES)}"
             ) from None
 
-        # Cache contents, indexed [set][way].
-        self._valid = [[False] * associativity for _ in range(self.num_sets)]
-        self._tags = [[0] * associativity for _ in range(self.num_sets)]
+        # Cache contents, indexed [set][way]: the block number held in each
+        # way (EMPTY for an invalid way) and its dirty bit.
+        self._blocks = [[EMPTY] * associativity for _ in range(self.num_sets)]
         self._dirty = [[False] * associativity for _ in range(self.num_sets)]
 
         # --- statistics -----------------------------------------------------
@@ -121,8 +148,10 @@ class Cache:
         self.read_misses = 0
         self.write_hits = 0
         self.write_misses = 0
-        self.evictions = 0
-        self.writebacks = 0  # dirty blocks pushed out on eviction
+        self.fills = 0  # blocks installed by allocate()
+        self.evictions = 0  # valid lines replaced by allocate()
+        self.invalidations = 0  # valid lines removed by invalidate()
+        self.writebacks = 0  # dirty lines removed (evicted or invalidated)
 
         # --- 3-C classification machinery ----------------------------------
         self.track_3c = track_3c
@@ -136,72 +165,154 @@ class Cache:
 
     # -- address arithmetic --------------------------------------------------
 
-    def _split(self, addr: int) -> tuple[int, int, int]:
-        """Break an address into (block number, set index, tag).
+    def block_of(self, addr: int) -> int:
+        """The block number containing byte address ``addr``."""
+        return addr // self.block_size
 
-        block = addr // block_size   -> which block-sized chunk of memory
-        set   = block % num_sets     -> which set that chunk may use
-        tag   = block // num_sets    -> distinguishes chunks within a set
+    def set_of(self, block: int) -> int:
+        """The set index a block maps to."""
+        return block % self.num_sets
+
+    def tag_of(self, block: int) -> int:
+        """The tag that distinguishes blocks sharing a set."""
+        return block // self.num_sets
+
+    # -- primitives ------------------------------------------------------------
+
+    def probe(self, block: int, is_write: bool = False) -> bool:
+        """Look ``block`` up. Returns True on hit, False on miss.
+
+        Updates hit/miss statistics, replacement state, the dirty bit on a
+        write hit, and the 3-C classification on a miss. Does not fill: on a
+        miss the caller decides whether and how to ``allocate``.
         """
-        block = addr // self.block_size
-        return block, block % self.num_sets, block // self.num_sets
-
-    # -- the main entry point --------------------------------------------------
-
-    def access(self, addr: int, is_write: bool = False) -> bool:
-        """Simulate one access. Returns True on hit, False on miss.
-
-        On a miss the block is installed into the cache, evicting a victim if
-        the set is full: ``access`` models both the lookup and the fill that
-        follows once the data arrives from the next level.
-        """
-        block, set_idx, tag = self._split(addr)
-
-        # Search the set for a matching valid tag (at most ``ways`` compares,
-        # matching the parallel tag comparators of real hardware).
-        valid = self._valid[set_idx]
-        tags = self._tags[set_idx]
+        set_idx = block % self.num_sets
+        blocks = self._blocks[set_idx]
+        # At most ``ways`` comparisons, like the parallel tag comparators of
+        # real hardware.
         for way in range(self.associativity):
-            if valid[way] and tags[way] == tag:
-                # HIT ---------------------------------------------------------
+            if blocks[way] == block:
                 self.hits += 1
                 if is_write:
                     self.write_hits += 1
                     self._dirty[set_idx][way] = True
                 else:
                     self.read_hits += 1
-                self.policy.on_hit(set_idx, way)
+                self.policy.on_hit(set_idx, way, block)
                 if self.track_3c:
                     self._update_shadow(block)
                 return True
 
-        # MISS -----------------------------------------------------------------
         self.misses += 1
         if is_write:
             self.write_misses += 1
         else:
             self.read_misses += 1
-
         if self.track_3c:
             self._classify_miss(block)
             self._update_shadow(block)
+        return False
 
-        # Fill: prefer an empty way; otherwise ask the policy for a victim.
-        way = -1
+    def allocate(self, block: int, dirty: bool = False) -> Evicted | None:
+        """Install ``block``, evicting a victim if its set is full.
+
+        Returns the evicted line, or None if an empty way was used. If the
+        block is already present this is a no-op (the dirty bit is OR-ed in)
+        and None is returned.
+        """
+        set_idx = block % self.num_sets
+        blocks = self._blocks[set_idx]
+        dirty_bits = self._dirty[set_idx]
+
+        way = EMPTY
         for w in range(self.associativity):
-            if not valid[w]:
+            held = blocks[w]
+            if held == block:
+                if dirty:
+                    dirty_bits[w] = True
+                return None
+            if held == EMPTY and way == EMPTY:
                 way = w
-                break
-        if way < 0:
+        evicted = None
+        if way == EMPTY:
             way = self.policy.victim(set_idx)
             self.evictions += 1
-            if self._dirty[set_idx][way]:
-                self.writebacks += 1  # modified data must be written down
+            evicted = Evicted(blocks[way], dirty_bits[way])
+            if evicted.dirty:
+                self.writebacks += 1
 
-        valid[way] = True
-        tags[way] = tag
-        self._dirty[set_idx][way] = is_write
-        self.policy.on_fill(set_idx, way)
+        blocks[way] = block
+        dirty_bits[way] = dirty
+        self.fills += 1
+        self.policy.on_fill(set_idx, way, block)
+        return evicted
+
+    def invalidate(self, block: int) -> Evicted | None:
+        """Remove ``block`` if present. Returns the removed line, else None.
+
+        Counts as an invalidation, not an eviction; a dirty line still
+        counts as a write-back because its data must be written down.
+        """
+        set_idx = block % self.num_sets
+        blocks = self._blocks[set_idx]
+        for way in range(self.associativity):
+            if blocks[way] == block:
+                removed = Evicted(block, self._dirty[set_idx][way])
+                blocks[way] = EMPTY
+                self._dirty[set_idx][way] = False
+                self.invalidations += 1
+                if removed.dirty:
+                    self.writebacks += 1
+                self.policy.on_invalidate(set_idx, way)
+                return removed
+        return None
+
+    def contains(self, block: int) -> bool:
+        """True if ``block`` is currently resident (no statistics updated)."""
+        return block in self._blocks[block % self.num_sets]
+
+    def is_dirty(self, block: int) -> bool:
+        """True if ``block`` is resident and dirty."""
+        set_idx = block % self.num_sets
+        blocks = self._blocks[set_idx]
+        for way in range(self.associativity):
+            if blocks[way] == block:
+                return self._dirty[set_idx][way]
+        return False
+
+    def mark_dirty(self, block: int) -> bool:
+        """Set the dirty bit of a resident block. Returns False if absent."""
+        set_idx = block % self.num_sets
+        blocks = self._blocks[set_idx]
+        for way in range(self.associativity):
+            if blocks[way] == block:
+                self._dirty[set_idx][way] = True
+                return True
+        return False
+
+    def lines(self) -> Iterator[tuple[int, int, int, bool]]:
+        """Yield ``(set_idx, way, block, dirty)`` for every valid line."""
+        for set_idx in range(self.num_sets):
+            blocks = self._blocks[set_idx]
+            dirty_bits = self._dirty[set_idx]
+            for way in range(self.associativity):
+                if blocks[way] != EMPTY:
+                    yield set_idx, way, blocks[way], dirty_bits[way]
+
+    # -- single-level convenience --------------------------------------------
+
+    def access(self, addr: int, is_write: bool = False) -> bool:
+        """Simulate one access at byte address ``addr``: probe, then fill on a miss.
+
+        Returns True on hit, False on miss. Models a single level backed by
+        memory: a miss allocates the block, evicting a victim if needed.
+        """
+        if addr < 0:
+            raise ValueError(f"{self.name}: address must be non-negative, got {addr}")
+        block = addr // self.block_size
+        if self.probe(block, is_write):
+            return True
+        self.allocate(block, dirty=is_write)
         return False
 
     # -- 3-C helpers ----------------------------------------------------------
