@@ -38,6 +38,32 @@ from collections import OrderedDict
 from cachesim.policies import POLICIES, ReplacementPolicy
 
 
+def _validate_geometry(name: str, size: int, block_size: int, associativity: int) -> None:
+    """Reject geometries that cannot be simulated.
+
+    ``block_size`` must be a power of two so that the block number is a
+    bit-field of the address. ``size`` must hold a whole number of sets:
+    the set count may be any positive integer (set index = block modulo
+    num_sets), although real hardware uses a power of two.
+    """
+    for label, value in (
+        ("size", size),
+        ("block_size", block_size),
+        ("associativity", associativity),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name}: {label} must be an integer, got {value!r}")
+        if value <= 0:
+            raise ValueError(f"{name}: {label} must be positive, got {value}")
+    if block_size & (block_size - 1):
+        raise ValueError(f"{name}: block_size must be a power of two, got {block_size}")
+    if size % (block_size * associativity) != 0:
+        raise ValueError(
+            f"{name}: size {size} must be a multiple of "
+            f"block_size*associativity ({block_size * associativity})"
+        )
+
+
 class Cache:
     """One set-associative cache level.
 
@@ -63,11 +89,7 @@ class Cache:
         track_3c: bool = True,
         rng_seed: int = 0,
     ) -> None:
-        if size % (block_size * associativity) != 0:
-            raise ValueError(
-                f"{name}: size {size} must be a multiple of "
-                f"block_size*associativity ({block_size * associativity})"
-            )
+        _validate_geometry(name, size, block_size, associativity)
 
         self.name = name
         self.size = size
@@ -77,6 +99,8 @@ class Cache:
         self.num_blocks = size // block_size
         self.policy_name = policy
 
+        if isinstance(rng_seed, bool) or not isinstance(rng_seed, int):
+            raise ValueError(f"{name}: rng_seed must be an integer, got {rng_seed!r}")
         rng = random.Random(rng_seed)
         try:
             self.policy: ReplacementPolicy = POLICIES[policy](self.num_sets, associativity, rng)

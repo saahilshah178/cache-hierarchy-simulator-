@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import unittest
+from typing import Any
 
 from cachesim.cache import Cache
 from tests.helpers import block_addr, tiny_cache
@@ -24,8 +25,44 @@ class TestAddressing(unittest.TestCase):
         self.assertEqual(c.num_blocks, 512)
 
     def test_bad_geometry_rejected(self) -> None:
+        bad: list[tuple[Any, Any, Any]] = [
+            (1000, 64, 4),  # size is not a multiple of block_size * ways
+            (0, 64, 4),
+            (-1024, 64, 4),
+            (1024, 0, 4),
+            (1024, -64, 4),
+            (1024, 48, 1),  # block size is not a power of two
+            (1024, 64, 0),
+            (1024, 64, -4),
+            (1024.0, 64, 4),  # not an int
+            (True, 64, 4),
+        ]
+        for size, block_size, ways in bad:
+            with (
+                self.subTest(size=size, block_size=block_size, ways=ways),
+                self.assertRaises(ValueError),
+            ):
+                Cache("bad", size=size, block_size=block_size, associativity=ways)
+
+    def test_non_power_of_two_set_count_allowed(self) -> None:
+        """Three sets is legal: set index is block modulo num_sets."""
+        c = Cache("odd", size=3 * 64 * 2, block_size=64, associativity=2)
+        self.assertEqual(c.num_sets, 3)
+        for blk in range(12):
+            c.access(blk * 64)
+        self.assertEqual(c.misses, 12)
+
+    def test_rng_seed_must_be_an_integer(self) -> None:
         with self.assertRaises(ValueError):
-            Cache("bad", size=1000, block_size=64, associativity=4)
+            Cache("r", 1024, 64, 2, policy="random", rng_seed=None)  # type: ignore[arg-type]
+
+    def test_rng_seed_changes_random_victims(self) -> None:
+        def run(seed: int) -> list[bool]:
+            c = Cache("r", 64 * 4, 64, 4, policy="random", rng_seed=seed)
+            return [c.access(blk * 64) for blk in [0, 1, 2, 3, 4, 0, 1, 2, 3, 4] * 4]
+
+        self.assertEqual(run(1), run(1))
+        self.assertNotEqual(run(1), run(2))
 
     def test_bad_policy_rejected(self) -> None:
         with self.assertRaises(ValueError):
