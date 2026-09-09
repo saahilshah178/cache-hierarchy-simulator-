@@ -3,7 +3,15 @@
 from typing import Any
 
 from cachesim.cache import Cache
-from cachesim.config import DEFAULT_CONFIG, default_config, load_config
+from cachesim.config import (
+    DEFAULT_CONFIG,
+    CacheSpec,
+    ConfigError,
+    HierarchySpec,
+    default_config,
+    load_config,
+    parse_config,
+)
 from cachesim.hierarchy import Hierarchy, Level
 from cachesim.policies import POLICIES, ReplacementPolicy
 from cachesim.report import build_report, print_report
@@ -15,13 +23,17 @@ __all__ = [
     "DEFAULT_CONFIG",
     "POLICIES",
     "Cache",
+    "CacheSpec",
+    "ConfigError",
     "Hierarchy",
+    "HierarchySpec",
     "Level",
     "ReplacementPolicy",
     "__version__",
     "build_report",
     "default_config",
     "load_config",
+    "parse_config",
     "parse_trace",
     "print_report",
     "run_trace",

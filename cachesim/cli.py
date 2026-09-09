@@ -8,7 +8,7 @@ import sys
 from collections.abc import Sequence
 
 from cachesim import __version__, run_trace
-from cachesim.config import DEFAULT_CONFIG, load_config
+from cachesim.config import DEFAULT_CONFIG, ConfigError, load_config
 from cachesim.report import print_report
 from cachesim.workloads import SAMPLE_TRACES, write_sample_traces
 
@@ -18,10 +18,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if args.config:
         try:
             config = load_config(args.config)
-        except (OSError, json.JSONDecodeError, ValueError) as exc:
+        except (OSError, json.JSONDecodeError, ConfigError) as exc:
             sys.exit(f"error: cannot load config {args.config}: {exc}")
     try:
         hierarchy = run_trace(args.trace, config)
+    except ConfigError as exc:
+        sys.exit(f"error: invalid config: {exc}")
     except (OSError, ValueError) as exc:
         sys.exit(f"error: {exc}")
     if hierarchy.accesses == 0:

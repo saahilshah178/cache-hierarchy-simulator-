@@ -33,9 +33,11 @@ the formula nests. Both the analytic value and the measured average
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from cachesim.cache import Cache
+from cachesim.config import ConfigError, HierarchySpec, parse_config
 
 
 class Level:
@@ -69,33 +71,33 @@ class Hierarchy:
     # -- construction helper --------------------------------------------------
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> Hierarchy:
+    def from_spec(cls, spec: HierarchySpec) -> Hierarchy:
+        """Build a hierarchy from a validated ``HierarchySpec``."""
+        levels = []
+        for level in spec.levels:
+            try:
+                cache = Cache(
+                    name=level.name,
+                    size=level.size,
+                    block_size=level.block_size,
+                    associativity=level.associativity,
+                    policy=level.policy,
+                    track_3c=level.track_3c,
+                    rng_seed=level.rng_seed,
+                )
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from None
+            levels.append(Level(cache, level.hit_time))
+        return cls(levels, spec.memory_access_time)
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> Hierarchy:
         """Build a hierarchy from a plain dict (e.g. parsed from JSON).
 
-        Expected shape::
-
-            {
-              "memory_access_time": 100,
-              "levels": [
-                {"name": "L1", "size": 32768, "block_size": 64,
-                 "associativity": 4, "policy": "lru", "hit_time": 4},
-                ...
-              ]
-            }
+        The dict is validated with ``config.parse_config``; see that module
+        for the expected shape. Raises ``ConfigError`` on malformed input.
         """
-        levels = []
-        for spec in config["levels"]:
-            cache = Cache(
-                name=spec["name"],
-                size=spec["size"],
-                block_size=spec["block_size"],
-                associativity=spec["associativity"],
-                policy=spec.get("policy", "lru"),
-                track_3c=spec.get("track_3c", True),
-                rng_seed=spec.get("rng_seed", 0),
-            )
-            levels.append(Level(cache, spec["hit_time"]))
-        return cls(levels, config["memory_access_time"])
+        return cls.from_spec(parse_config(config))
 
     # -- the main entry point ---------------------------------------------------
 
