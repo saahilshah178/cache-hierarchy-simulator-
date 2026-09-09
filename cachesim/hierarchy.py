@@ -205,6 +205,18 @@ class Hierarchy:
                     self._write_back(i + 1, block)
         return self.dram_writes - before
 
+    def reset_stats(self) -> None:
+        """Zero every counter at every level while keeping cache contents.
+
+        Call it after a warm-up prefix of the trace so the reported figures
+        describe steady-state behaviour rather than cold caches.
+        """
+        self.accesses = self.reads = self.writes = 0
+        self.dram_reads = self.dram_writes = 0
+        self.total_time = 0
+        for level in self.levels:
+            level.cache.reset_stats()
+
     # -- metrics -------------------------------------------------------------
 
     def stats(self) -> HierarchyStats:

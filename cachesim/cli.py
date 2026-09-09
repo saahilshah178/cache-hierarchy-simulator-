@@ -21,13 +21,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         except (OSError, json.JSONDecodeError, ConfigError) as exc:
             sys.exit(f"error: cannot load config {args.config}: {exc}")
     try:
-        hierarchy = run_trace(args.trace, config)
+        hierarchy = run_trace(args.trace, config, warmup=args.warmup)
     except ConfigError as exc:
         sys.exit(f"error: invalid config: {exc}")
     except (OSError, ValueError) as exc:
         sys.exit(f"error: {exc}")
     if hierarchy.accesses == 0:
-        sys.exit(f"error: no accesses found in {args.trace}")
+        detail = " after the warm-up" if args.warmup else ""
+        sys.exit(f"error: no accesses found in {args.trace}{detail}")
     if args.format == "json":
         print(json.dumps(hierarchy.stats().to_dict(), indent=2))
     else:
@@ -60,6 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         metavar="FILE",
         help="JSON hierarchy config (default: built-in L1/L2/L3 config, see configs/default.json)",
+    )
+    p_run.add_argument(
+        "--warmup",
+        type=int,
+        default=0,
+        metavar="N",
+        help="simulate the first N accesses, then reset all statistics before "
+        "counting the rest (default 0: report the whole trace, cold caches)",
     )
     p_run.add_argument(
         "--format",

@@ -45,9 +45,20 @@ __all__ = [
 ]
 
 
-def run_trace(trace_path: str, config: dict[str, Any] | None = None) -> Hierarchy:
-    """Simulate one trace through one hierarchy; returns the Hierarchy."""
+def run_trace(trace_path: str, config: dict[str, Any] | None = None, warmup: int = 0) -> Hierarchy:
+    """Simulate one trace through one hierarchy; returns the Hierarchy.
+
+    ``warmup`` accesses are simulated first and then the statistics are
+    reset, so the returned counters describe only the remainder.
+    """
     hierarchy = Hierarchy.from_config(config or DEFAULT_CONFIG)
-    for addr, is_write in parse_trace(trace_path):
+    accesses = parse_trace(trace_path)
+    if warmup > 0:
+        for n, (addr, is_write) in enumerate(accesses, start=1):
+            hierarchy.access(addr, is_write)
+            if n == warmup:
+                break
+        hierarchy.reset_stats()
+    for addr, is_write in accesses:
         hierarchy.access(addr, is_write)
     return hierarchy

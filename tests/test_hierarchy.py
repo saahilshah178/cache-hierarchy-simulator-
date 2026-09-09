@@ -153,3 +153,41 @@ class TestWritebackPropagation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestWarmup(unittest.TestCase):
+    def test_reset_keeps_contents_and_seen_blocks(self) -> None:
+        l1 = Cache("L1", 256, 64, 1)
+        h = Hierarchy([Level(l1, 4)], memory_access_time=100)
+        h.access(0x0)
+        h.access(0x40)
+        h.reset_stats()
+        self.assertEqual((h.accesses, h.total_time, l1.misses, l1.compulsory_misses), (0, 0, 0, 0))
+        self.assertTrue(l1.contains(0))
+        self.assertEqual(h.access(0x0), 4)  # still resident: a hit
+        self.assertEqual((l1.hits, l1.misses), (1, 0))
+        # Evict block 0 with an alias, then touch it again: a miss, but not
+        # compulsory, because it was seen before the reset.
+        h.access(4 * 64)
+        h.access(0x0)
+        self.assertEqual(l1.compulsory_misses, 1)  # only block 4 was new
+        self.assertEqual(l1.misses, 2)
+
+    def test_run_trace_warmup(self) -> None:
+        import os
+        import tempfile
+
+        from cachesim import run_trace
+        from cachesim.workloads import sequential, write_trace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "seq.trace")
+            write_trace(path, sequential(buffer_bytes=4096, passes=3))  # 512 accesses/pass
+            cold = run_trace(path)
+            warm = run_trace(path, warmup=512)
+            self.assertEqual(cold.accesses, 1536)
+            self.assertEqual(warm.accesses, 1024)
+            # The buffer fits in L1, so after the first pass everything hits.
+            self.assertEqual(cold.levels[0].cache.misses, 64)
+            self.assertEqual(warm.levels[0].cache.misses, 0)
+            self.assertEqual(warm.levels[0].cache.compulsory_misses, 0)

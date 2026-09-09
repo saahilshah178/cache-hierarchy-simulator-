@@ -373,6 +373,18 @@ class Cache:
             self._shadow.popitem(last=False)  # evict shadow's LRU block
         return False
 
+    def reset_stats(self) -> None:
+        """Zero every counter, keeping the contents, replacement state, and
+        the set of blocks already seen (so a later reference to a block
+        touched before the reset is not counted as compulsory)."""
+        self.hits = self.misses = 0
+        self.read_hits = self.read_misses = 0
+        self.write_hits = self.write_misses = 0
+        self.fills = self.evictions = self.invalidations = 0
+        self.writebacks = self.writebacks_received = self.writeback_allocations = 0
+        self.compulsory_misses = self.capacity_misses = self.conflict_misses = 0
+        self.shadow_misses = self.anti_conflict_hits = 0
+
     # -- derived stats ----------------------------------------------------------
 
     @property
