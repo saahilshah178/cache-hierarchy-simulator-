@@ -1,4 +1,4 @@
-"""sweep.py — sweeps cache parameters and plots miss rate against each.
+"""Sweeps cache parameters and plots miss rate against each.
 
 Two sweeps, both run on a SINGLE cache level backed directly by memory
 (so the effect of the knob you are turning isn't blurred by L2/L3):
@@ -20,9 +20,9 @@ dimensions.
 
 Usage::
 
-    python3 sweep.py                              # the two default demos
-    python3 sweep.py traces/pointer_chase.trace   # both sweeps on one trace
-    python3 sweep.py --size 16384 --policy fifo   # tweak the fixed knobs
+    cachesim sweep                              # the two default sweeps
+    cachesim sweep traces/pointer_chase.trace   # both sweeps on one trace
+    cachesim sweep --size 16384 --policy fifo   # change the fixed knobs
 
 Prints a table for each sweep and saves plots to plots/*.png (matplotlib).
 """
@@ -30,9 +30,10 @@ Prints a table for each sweep and saves plots to plots/*.png (matplotlib).
 import argparse
 import os
 
-from cache import Cache, POLICIES
-from hierarchy import Hierarchy, Level
-from simulator import parse_trace
+from cachesim.cache import Cache
+from cachesim.hierarchy import Hierarchy, Level
+from cachesim.policies import POLICIES
+from cachesim.trace import parse_trace
 
 ASSOCIATIVITIES = [1, 2, 4, 8, 16]
 SIZES_KB = [1, 2, 4, 8, 16, 32, 64]
@@ -132,7 +133,7 @@ def plot(assoc_results, size_results, assoc_trace, size_trace,
         print(f"saved {path}")
 
 
-def main(argv=None):
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Sweep cache associativity and size; plot miss rates.")
     parser.add_argument("trace", nargs="?", default=None,
@@ -191,6 +192,7 @@ def main(argv=None):
 
     plot(assoc_results, size_results, assoc_trace_path, size_trace_path,
          args.size, args.assoc)
+    return 0
 
 
 if __name__ == "__main__":
