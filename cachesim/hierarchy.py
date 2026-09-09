@@ -12,11 +12,20 @@ Modelling choices:
 
 * Allocate-on-miss at every level: when a level misses, the block is
   installed into that level as part of the same access.
-* Writes dirty the first level only (write-back semantics): if a store
-  misses L1, the levels below are supplying the line, so they see a read.
+* Write-back, write-allocate at every level. A store dirties the line in
+  L1 only; the levels below supply the line, so they see a read. When a
+  dirty line is evicted from level i it is written into level i+1: the
+  copy there is marked dirty, or the line is allocated dirty if level i+1
+  no longer holds it (which may evict another line, handled the same way).
+  A dirty line evicted from the last level is written to DRAM.
 * Timing charges each level's hit time once per level probed, plus the
   memory access time if everything missed. Write-back traffic is counted
-  (see ``Cache.writebacks``) but not charged time.
+  (``Cache.writebacks``, ``Hierarchy.dram_writes``) but not charged time,
+  as if fully absorbed by write buffers.
+* Levels are non-inclusive, non-exclusive (NINE): a fill installs the
+  block in every level that missed, but nothing keeps the levels
+  consistent afterwards, so a lower level may evict a line that an upper
+  level still holds.
 
 The model is functional (exact hit/miss/eviction behaviour) with a serial,
 fixed-latency timing model; it does not model overlap of misses (MSHRs),
@@ -71,7 +80,8 @@ class Hierarchy:
         self.accesses = 0
         self.reads = 0
         self.writes = 0
-        self.memory_accesses = 0  # accesses that fell all the way to DRAM
+        self.dram_reads = 0  # demand fetches that missed every level
+        self.dram_writes = 0  # dirty lines written back from the last level
         self.total_time = 0  # simulated cycles spent on all accesses
 
     # -- construction helper --------------------------------------------------
@@ -139,7 +149,7 @@ class Hierarchy:
         else:
             # Missed every level: fetch from DRAM.
             time += self.memory_access_time
-            self.memory_accesses += 1
+            self.dram_reads += 1
 
         # Fill the block into every level above the one that supplied it.
         for i in range(hit_level - 1, -1, -1):
@@ -151,13 +161,55 @@ class Hierarchy:
         return time
 
     def _handle_eviction(self, level_index: int, evicted: Evicted) -> None:
-        """React to a line leaving ``levels[level_index]``.
+        """React to a line leaving ``levels[level_index]``: write it back if dirty."""
+        if evicted.dirty:
+            self._write_back(level_index + 1, evicted.block)
 
-        Write-backs are counted at the evicting level (``Cache.writebacks``)
-        and not forwarded further down.
+    def _write_back(self, level_index: int, block: int) -> None:
+        """Deliver a dirty block to ``levels[level_index]`` (or DRAM past the end).
+
+        The receiving level marks its copy dirty, or allocates the block
+        dirty if it no longer holds it; an eviction caused by that
+        allocation is handled recursively.
         """
+        if level_index >= len(self.levels):
+            self._write_to_memory(block)
+            return
+        cache = self.levels[level_index].cache
+        cache.writebacks_received += 1
+        if not cache.mark_dirty(block):
+            cache.writeback_allocations += 1
+            evicted = cache.allocate(block, dirty=True)
+            if evicted is not None:
+                self._handle_eviction(level_index, evicted)
+
+    def _write_to_memory(self, block: int) -> None:
+        """A dirty block leaves the last level: one DRAM write."""
+        self.dram_writes += 1
+
+    def flush(self) -> int:
+        """Write every dirty line back to DRAM and clean it, top-down.
+
+        Lines stay resident. Returns the number of DRAM writes performed.
+        Use it at the end of a run to account for modified data that is
+        still in the caches, or to check dirty-data conservation.
+        """
+        before = self.dram_writes
+        for i, level in enumerate(self.levels):
+            cache = level.cache
+            for _, _, block, dirty in list(cache.lines()):
+                if dirty:
+                    cache.clean(block)
+                    cache.writebacks += 1
+                    self._write_back(i + 1, block)
+        return self.dram_writes - before
 
     # -- metrics -------------------------------------------------------------
+
+    @property
+    def memory_accesses(self) -> int:
+        """Total DRAM traffic: demand reads plus write-backs."""
+        return self.dram_reads + self.dram_writes
 
     def global_miss_rate(self, level_index: int) -> float:
         """Misses at this level / all CPU accesses (not just ones reaching it)."""

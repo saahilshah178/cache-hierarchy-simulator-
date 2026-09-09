@@ -37,9 +37,12 @@ def build_report(hierarchy: Hierarchy, trace_name: str | None = None) -> str:
     lines.append(bar)
     lines.append(f"Total accesses : {h.accesses:>12,}   (reads {h.reads:,} / writes {h.writes:,})")
     lines.append(
-        f"DRAM accesses  : {h.memory_accesses:>12,}"
-        f"   ({_pct(h.memory_accesses, h.accesses).strip()} of all"
-        " accesses fell through every cache)"
+        f"DRAM reads     : {h.dram_reads:>12,}"
+        f"   ({_pct(h.dram_reads, h.accesses).strip()} of all accesses missed every level)"
+    )
+    lines.append(
+        f"DRAM writes    : {h.dram_writes:>12,}"
+        f"   (dirty lines written back from {h.levels[-1].cache.name})"
     )
     lines.append("")
 
@@ -70,6 +73,12 @@ def build_report(hierarchy: Hierarchy, trace_name: str | None = None) -> str:
         lines.append(
             f"  evictions   : {c.evictions:>12,}   (writebacks of dirty blocks: {c.writebacks:,})"
         )
+        if i > 0:
+            lines.append(
+                f"  writebacks received : {c.writebacks_received:>6,}"
+                f"   (from {h.levels[i - 1].cache.name}; "
+                f"{c.writeback_allocations:,} allocated a line)"
+            )
         if c.track_3c and c.misses:
             lines.append("  miss breakdown (the 3 Cs):")
             lines.append(

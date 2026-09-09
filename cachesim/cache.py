@@ -151,7 +151,9 @@ class Cache:
         self.fills = 0  # blocks installed by allocate()
         self.evictions = 0  # valid lines replaced by allocate()
         self.invalidations = 0  # valid lines removed by invalidate()
-        self.writebacks = 0  # dirty lines removed (evicted or invalidated)
+        self.writebacks = 0  # dirty lines written down (evicted, invalidated, flushed)
+        self.writebacks_received = 0  # dirty lines written into this level from above
+        self.writeback_allocations = 0  # ... of which had to be allocated (line was absent)
 
         # --- 3-C classification machinery ----------------------------------
         self.track_3c = track_3c
@@ -287,6 +289,16 @@ class Cache:
         for way in range(self.associativity):
             if blocks[way] == block:
                 self._dirty[set_idx][way] = True
+                return True
+        return False
+
+    def clean(self, block: int) -> bool:
+        """Clear the dirty bit of a resident block. Returns False if absent."""
+        set_idx = block % self.num_sets
+        blocks = self._blocks[set_idx]
+        for way in range(self.associativity):
+            if blocks[way] == block:
+                self._dirty[set_idx][way] = False
                 return True
         return False
 
