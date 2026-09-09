@@ -175,9 +175,37 @@ def plot(
         print(f"saved {path}")
 
 
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {text}")
+    return value
+
+
+def _non_negative_int(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be a non-negative integer, got {text}")
+    return value
+
+
+def _load_trace(parser: argparse.ArgumentParser, path: str) -> list[tuple[int, bool]]:
+    """Parse a whole trace into memory, turning problems into CLI errors."""
+    try:
+        trace = list(parse_trace(path))
+    except FileNotFoundError:
+        parser.error(f"trace not found: {path} (run `cachesim gen-traces` to create the samples)")
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
+    if not trace:
+        parser.error(f"no accesses in {path}")
+    return trace
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Sweep cache associativity and size; plot miss rates."
+        prog="cachesim sweep",
+        description="Sweep cache associativity and size; plot miss rates.",
     )
     parser.add_argument(
         "trace",
@@ -189,30 +217,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--size",
-        type=int,
+        type=_positive_int,
         default=8 * 1024,
         help="fixed size in bytes for the associativity sweep (default 8192 = 8 KB)",
     )
     parser.add_argument(
-        "--assoc", type=int, default=4, help="fixed associativity for the size sweep (default 4)"
+        "--assoc",
+        type=_positive_int,
+        default=4,
+        help="fixed associativity for the size sweep (default 4)",
     )
     parser.add_argument(
-        "--block-size", type=int, default=64, help="block size in bytes (default 64)"
+        "--block-size", type=_positive_int, default=64, help="block size in bytes (default 64)"
     )
     parser.add_argument(
         "--policy", default="lru", choices=sorted(POLICIES), help="replacement policy (default lru)"
     )
     parser.add_argument(
-        "--hit-time", type=int, default=4, help="cache hit time in cycles (default 4)"
+        "--hit-time", type=_non_negative_int, default=4, help="cache hit time in cycles (default 4)"
     )
     parser.add_argument(
-        "--mem-time", type=int, default=100, help="memory access time in cycles (default 100)"
+        "--mem-time",
+        type=_non_negative_int,
+        default=100,
+        help="memory access time in cycles (default 100)",
+    )
+    parser.add_argument(
+        "--out-dir", default="plots", help="directory for the plots (default: plots)"
     )
     args = parser.parse_args(argv)
 
     # Validate the fixed knobs against every point we are about to sweep,
     # so a bad combination fails with one clear message instead of a
     # traceback halfway through.
+    if args.block_size & (args.block_size - 1):
+        parser.error(f"--block-size must be a power of two, got {args.block_size}")
     for ways in ASSOCIATIVITIES:
         if args.size % (args.block_size * ways):
             parser.error(
@@ -232,21 +271,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     size_trace_path = args.trace or "traces/matmul_naive.trace"
 
     # Parse each trace once; every sweep point replays the same access list.
-    assoc_trace = list(parse_trace(assoc_trace_path))
+    assoc_trace = _load_trace(parser, assoc_trace_path)
     print(f"associativity sweep trace: {assoc_trace_path} ({len(assoc_trace):,} accesses)")
     assoc_results = sweep_associativity(
         assoc_trace, args.size, args.block_size, args.policy, args.hit_time, args.mem_time
     )
 
     size_trace = (
-        assoc_trace if size_trace_path == assoc_trace_path else list(parse_trace(size_trace_path))
+        assoc_trace if size_trace_path == assoc_trace_path else _load_trace(parser, size_trace_path)
     )
     print(f"\nsize sweep trace: {size_trace_path} ({len(size_trace):,} accesses)")
     size_results = sweep_size(
         size_trace, args.assoc, args.block_size, args.policy, args.hit_time, args.mem_time
     )
 
-    plot(assoc_results, size_results, assoc_trace_path, size_trace_path, args.size, args.assoc)
+    plot(
+        assoc_results,
+        size_results,
+        assoc_trace_path,
+        size_trace_path,
+        args.size,
+        args.assoc,
+        out_dir=args.out_dir,
+    )
     return 0
 
 
