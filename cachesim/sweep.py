@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from collections.abc import Sequence
+from typing import Any
 
 from cachesim.cache import Cache
 from cachesim.hierarchy import Hierarchy, Level
@@ -202,11 +204,8 @@ def _load_trace(parser: argparse.ArgumentParser, path: str) -> list[tuple[int, b
     return trace
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="cachesim sweep",
-        description="Sweep cache associativity and size; plot miss rates.",
-    )
+def add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the sweep options to ``parser``."""
     parser.add_argument(
         "trace",
         nargs="?",
@@ -245,7 +244,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--out-dir", default="plots", help="directory for the plots (default: plots)"
     )
-    args = parser.parse_args(argv)
+
+
+def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    """Execute a sweep from parsed arguments."""
 
     # Validate the fixed knobs against every point we are about to sweep,
     # so a bad combination fails with one clear message instead of a
@@ -297,5 +299,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+def register(subparsers: Any) -> None:
+    """Register the ``sweep`` subcommand with the ``cachesim`` CLI."""
+    parser = subparsers.add_parser(
+        "sweep", help="sweep associativity and cache size; tabulate and plot miss rates"
+    )
+    add_arguments(parser)
+    parser.set_defaults(func=lambda args: run(args, parser))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Stand-alone entry point (``python -m cachesim.sweep``)."""
+    parser = argparse.ArgumentParser(
+        prog="cachesim sweep",
+        description="Sweep cache associativity and size; plot miss rates.",
+    )
+    add_arguments(parser)
+    return run(parser.parse_args(argv), parser)
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

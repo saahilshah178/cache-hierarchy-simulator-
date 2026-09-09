@@ -1,16 +1,24 @@
-"""Command-line interface: ``cachesim <subcommand> ...``."""
+"""Command-line interface: ``cachesim <subcommand> ...``.
+
+Each subcommand lives in the module that implements it and exposes a
+``register(subparsers)`` function that adds its parser and sets a ``func``
+default; ``COMMANDS`` lists them in display order.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import TypeAlias
 
 from cachesim import __version__, run_trace
 from cachesim.config import DEFAULT_CONFIG, ConfigError, load_config
 from cachesim.report import print_report
 from cachesim.workloads import SAMPLE_TRACES, write_sample_traces
+
+Subparsers: TypeAlias = "argparse._SubParsersAction[argparse.ArgumentParser]"
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -36,33 +44,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_gen_traces(args: argparse.Namespace) -> int:
-    print(f"generating traces in {args.out_dir}:")
-    write_sample_traces(args.out_dir, args.names or None)
-    return 0
-
-
-def _cmd_sweep(args: argparse.Namespace) -> int:
-    from cachesim.sweep import main as sweep_main
-
-    return sweep_main(args.sweep_args)
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="cachesim", description="Trace-driven cache and memory-hierarchy simulator."
-    )
-    parser.add_argument("--version", action="version", version=f"cachesim {__version__}")
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    p_run = sub.add_parser("run", help="simulate one trace and print a report")
-    p_run.add_argument("trace", help="trace file (one 'ADDR R|W' per line)")
-    p_run.add_argument(
+def register_run(subparsers: Subparsers) -> None:
+    p = subparsers.add_parser("run", help="simulate one trace and print a report")
+    p.add_argument("trace", help="trace file (one 'ADDR R|W' per line)")
+    p.add_argument(
         "--config",
         metavar="FILE",
         help="JSON hierarchy config (default: built-in L1/L2/L3 config, see configs/default.json)",
     )
-    p_run.add_argument(
+    p.add_argument(
         "--warmup",
         type=int,
         default=0,
@@ -70,29 +60,56 @@ def build_parser() -> argparse.ArgumentParser:
         help="simulate the first N accesses, then reset all statistics before "
         "counting the rest (default 0: report the whole trace, cold caches)",
     )
-    p_run.add_argument(
+    p.add_argument(
         "--format",
         choices=("text", "json"),
         default="text",
         help="report format: human-readable text (default) or JSON",
     )
-    p_run.set_defaults(func=_cmd_run)
+    p.set_defaults(func=_cmd_run)
 
-    p_gen = sub.add_parser("gen-traces", help="write the sample traces")
-    p_gen.add_argument(
+
+def _cmd_gen_traces(args: argparse.Namespace) -> int:
+    print(f"generating traces in {args.out_dir}:")
+    write_sample_traces(args.out_dir, args.names or None)
+    return 0
+
+
+def register_gen_traces(subparsers: Subparsers) -> None:
+    p = subparsers.add_parser("gen-traces", help="write the sample traces")
+    p.add_argument(
         "names",
         nargs="*",
         choices=sorted(SAMPLE_TRACES),
         help="which traces to write (default: all)",
     )
-    p_gen.add_argument("--out-dir", default="traces", help="output directory (default: traces)")
-    p_gen.set_defaults(func=_cmd_gen_traces)
+    p.add_argument("--out-dir", default="traces", help="output directory (default: traces)")
+    p.set_defaults(func=_cmd_gen_traces)
 
-    p_sweep = sub.add_parser(
-        "sweep", help="sweep associativity and size; plot miss rates", add_help=False
+
+def _register_sweep(subparsers: Subparsers) -> None:
+    from cachesim.sweep import register
+
+    register(subparsers)
+
+
+#: Subcommand registration functions, in the order shown by --help.
+COMMANDS: list[Callable[[Subparsers], None]] = [
+    register_run,
+    _register_sweep,
+    register_gen_traces,
+]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="cachesim",
+        description="Trace-driven cache and memory-hierarchy simulator.",
     )
-    p_sweep.add_argument("sweep_args", nargs=argparse.REMAINDER)
-    p_sweep.set_defaults(func=_cmd_sweep)
+    parser.add_argument("--version", action="version", version=f"cachesim {__version__}")
+    subparsers = parser.add_subparsers(dest="command", required=True, metavar="<command>")
+    for register in COMMANDS:
+        register(subparsers)
     return parser
 
 
