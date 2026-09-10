@@ -217,6 +217,8 @@ def run_point(accesses: Accesses, spec: CacheSpec, param: str, mem_time: int) ->
             policy=spec.policy,
             track_3c=spec.track_3c,
             rng_seed=spec.rng_seed,
+            index=spec.index,
+            victim_entries=spec.victim_cache,
         )
     except ValueError as exc:
         raise ValueError(f"{param}: {exc}") from None

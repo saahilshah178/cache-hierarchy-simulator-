@@ -59,6 +59,8 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
         # Only features that are switched on appear in the header, so a
         # default hierarchy reports exactly what it used to.
         extra = "" if lv.inclusion == "nine" else f", {lv.inclusion} of {s.levels[i - 1].name}"
+        if lv.index != "modulo":
+            extra += f", {lv.index} indexing"
         if lv.write_policy != "write-back":
             extra += f", {lv.write_policy}"
         if not lv.write_allocate:

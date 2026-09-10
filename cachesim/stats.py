@@ -44,6 +44,7 @@ class LevelStats:
     associativity: int
     num_sets: int
     policy: str
+    index: str
     hit_time: int
     inclusion: str
     write_policy: str
@@ -155,6 +156,7 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
                 associativity=c.associativity,
                 num_sets=c.num_sets,
                 policy=c.policy_name,
+                index=c.index_name,
                 hit_time=level.hit_time,
                 inclusion=level.inclusion,
                 write_policy=level.write_policy,
