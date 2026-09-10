@@ -8,7 +8,7 @@ from unittest import mock
 
 from cachesim.cache import Cache
 from cachesim.hierarchy import Hierarchy, Level
-from cachesim.policies import POLICIES, ReplacementPolicy
+from cachesim.policies import POLICIES, DRRIPPolicy, ReplacementPolicy
 from tests.helpers import block_addr, tiny_cache
 
 
@@ -233,6 +233,157 @@ class TestMRU(unittest.TestCase):
                 measured = sum(cyclic_scan(one_set_cache(ways, "mru"), ways + 1, passes))
                 predicted = (ways + 1) + (passes - 1) + (passes - 1) // ways
                 self.assertEqual(measured, predicted, f"ways={ways} passes={passes}")
+
+
+class TestRRIP(unittest.TestCase):
+    """Re-reference interval prediction (Jaleel et al., ISCA 2010)."""
+
+    WAYS = 4
+    SCAN_PER_ROUND = 3
+    ROUNDS = 10
+
+    def scan_rounds(self, policy: str) -> tuple[Cache, list[int]]:
+        """Two hot blocks touched twice, then three one-touch scan blocks.
+
+        Repeated ``ROUNDS`` times over a single 4-way set, with fresh scan
+        blocks every round. The hot pair fits in the set with two ways to
+        spare, so keeping them is the right decision and every miss on them
+        is a policy failure.
+        """
+        cache = one_set_cache(self.WAYS, policy)
+        block_size = cache.block_size
+        scan_block = 100
+        per_round = []
+        for _ in range(self.ROUNDS):
+            before = cache.misses
+            for _ in range(2):
+                cache.access(1 * block_size)
+                cache.access(2 * block_size)
+            for _ in range(self.SCAN_PER_ROUND):
+                cache.access(scan_block * block_size)
+                scan_block += 1
+            per_round.append(cache.misses - before)
+        return cache, per_round
+
+    def test_srrip_survives_a_scan_that_flushes_lru(self) -> None:
+        # LRU installs every scan block as most recently used, so the hot
+        # pair is evicted every round: 2 compulsory + 3 scan = 5 misses per
+        # round for ever. SRRIP inserts scan blocks at RRPV 2 and promotes
+        # the hot pair to 0 on their hits, so from round 2 only the three
+        # scan blocks miss.
+        lru, lru_rounds = self.scan_rounds("lru")
+        srrip, srrip_rounds = self.scan_rounds("srrip")
+        self.assertEqual(lru_rounds, [5] * self.ROUNDS)
+        self.assertEqual(srrip_rounds, [5] + [3] * (self.ROUNDS - 1))
+        self.assertEqual((lru.misses, srrip.misses), (50, 32))
+        # The hot pair is what survives, not just a lower count.
+        self.assertLessEqual({1, 2}, resident_blocks(srrip))
+        self.assertNotIn(1, resident_blocks(lru))
+
+    def test_brrip_keeps_a_thrashing_working_set_resident(self) -> None:
+        # Cyclic scan of 5 blocks over a 4-way set. LRU and SRRIP both evict
+        # the block that is referenced next and miss 100% of the time.
+        # BRRIP inserts at RRPV 3, so a new block is the next victim and
+        # three of the four ways stay put: two misses per pass.
+        passes = 10
+        lru = cyclic_scan(one_set_cache(self.WAYS, "lru"), 5, passes)
+        srrip = cyclic_scan(one_set_cache(self.WAYS, "srrip"), 5, passes)
+        brrip = cyclic_scan(one_set_cache(self.WAYS, "brrip"), 5, passes)
+        self.assertEqual(lru, [5] * passes)
+        self.assertEqual(srrip, [5] * passes)
+        self.assertEqual(brrip, [5] + [2] * (passes - 1))
+        self.assertEqual((sum(srrip), sum(brrip)), (50, 23))
+
+    def test_brrip_is_reproducible(self) -> None:
+        # The 1/32 insertions come from the cache's seeded RNG.
+        runs = [sum(cyclic_scan(one_set_cache(self.WAYS, "brrip"), 5, 40)) for _ in range(2)]
+        self.assertEqual(runs[0], runs[1])
+
+    def test_rrip_ages_a_set_until_a_victim_appears(self) -> None:
+        # Every way holds a block that was just hit (RRPV 0), so victim()
+        # has to increment the whole set three times before any way reaches
+        # RRPV 3; the first way to get there is the lowest-numbered one.
+        c = one_set_cache(self.WAYS, "srrip")
+        for tag in (1, 2, 3, 4):
+            c.access(tag * c.block_size)
+            c.access(tag * c.block_size)  # promote to RRPV 0
+        self.assertEqual(c.policy.victim(0), 0)
+
+
+class TestDRRIP(unittest.TestCase):
+    """Set dueling between SRRIP and BRRIP with a 10-bit PSEL counter."""
+
+    def make_policy(self, num_sets: int, num_ways: int = 4) -> DRRIPPolicy:
+        policy = POLICIES["drrip"](num_sets, num_ways)
+        assert isinstance(policy, DRRIPPolicy)
+        return policy
+
+    def test_leader_sets_are_chosen_by_index(self) -> None:
+        p = self.make_policy(256)
+        srrip = [s for s in range(256) if p.role_of(s) == "srrip-leader"]
+        brrip = [s for s in range(256) if p.role_of(s) == "brrip-leader"]
+        self.assertEqual(srrip, [0, 64, 128, 192])
+        self.assertEqual(brrip, [32, 96, 160, 224])
+        self.assertEqual(p.role_of(1), "follower")
+
+    def test_small_caches_fall_back_to_one_leader_each(self) -> None:
+        p = self.make_policy(8)
+        expected = ["srrip-leader"] + ["follower"] * 3 + ["brrip-leader"] + ["follower"] * 3
+        self.assertEqual([p.role_of(s) for s in range(8)], expected)
+        # A single set cannot duel: it follows, and PSEL never moves.
+        single = self.make_policy(1)
+        self.assertEqual(single.role_of(0), "follower")
+
+    def test_psel_saturates_in_both_directions(self) -> None:
+        p = self.make_policy(64)
+        self.assertEqual(p.following(), "srrip")  # 511: below the threshold
+        for _ in range(2000):  # misses in the SRRIP leader set
+            p.on_fill(0, 0, 1)
+        self.assertEqual(p.psel, p.PSEL_MAX)
+        self.assertEqual(p.following(), "brrip")
+        for _ in range(2000):  # misses in the BRRIP leader set
+            p.on_fill(32, 0, 1)
+        self.assertEqual(p.psel, 0)
+        self.assertEqual(p.following(), "srrip")
+
+    def test_drrip_learns_to_use_brrip_on_a_thrashing_workload(self) -> None:
+        # 64 sets x 4 ways, with five blocks per set cycled 20 times: the
+        # working set is one block per set too large, the case BRRIP exists
+        # for. DRRIP pays for the duel on two sets and tracks BRRIP.
+        sets, ways, passes = 64, 4, 20
+        one_pass = [(s + sets * j) * 64 for s in range(sets) for j in range(ways + 1)]
+        stream = one_pass * passes
+        caches = {}
+        for name in ("srrip", "brrip", "drrip"):
+            c = Cache("S", size=sets * ways * 64, block_size=64, associativity=ways, policy=name)
+            for addr in stream:
+                c.access(addr)
+            caches[name] = c
+        self.assertEqual(caches["srrip"].misses, len(stream))  # 100% miss: thrashing
+        self.assertEqual(caches["brrip"].misses, 2752)
+        self.assertEqual(caches["drrip"].misses, 2810)
+        policy = caches["drrip"].policy
+        assert isinstance(policy, DRRIPPolicy)
+        self.assertEqual(policy.following(), "brrip")
+
+    def test_drrip_leaves_psel_alone_when_the_working_set_fits(self) -> None:
+        # Four blocks per set in a 4-way cache: nothing is ever evicted, so
+        # the two leader sets miss equally and the duel stays a draw.
+        sets, ways = 64, 4
+        c = Cache("S", size=sets * ways * 64, block_size=64, associativity=ways, policy="drrip")
+        for _ in range(20):
+            for block in range(sets * ways):
+                c.access(block * 64)
+        self.assertEqual(c.misses, sets * ways)  # compulsory only
+        policy = c.policy
+        assert isinstance(policy, DRRIPPolicy)
+        self.assertEqual(policy.psel, policy.PSEL_THRESHOLD - 1)
+        self.assertEqual(policy.following(), "srrip")
+
+    def test_drrip_degenerates_to_srrip_without_leader_sets(self) -> None:
+        srrip = cyclic_scan(one_set_cache(4, "srrip"), 5, 10)
+        drrip = cyclic_scan(one_set_cache(4, "drrip"), 5, 10)
+        self.assertEqual(drrip, srrip)
 
 
 class TestEveryPolicy(unittest.TestCase):

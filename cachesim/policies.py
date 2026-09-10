@@ -17,7 +17,8 @@ Policies are selected by name through the ``POLICIES`` registry.
 Two families live here:
 
 * recency and frequency approximations that real hardware implements --
-  ``lru``, ``fifo``, ``plru`` (tree pseudo-LRU), ``nru``, and ``lfu``;
+  ``lru``, ``fifo``, ``plru`` (tree pseudo-LRU), ``nru``, ``lfu``, and the
+  re-reference interval predictors ``srrip``, ``brrip`` and ``drrip``;
 * deliberate contrasts used to bound behaviour -- ``random`` and ``mru``.
 """
 
@@ -271,6 +272,188 @@ class LFUPolicy(ReplacementPolicy):
         return best
 
 
+# -- re-reference interval prediction ------------------------------------------
+#
+# Jaleel, Theobald, Steely and Emer, "High Performance Cache Replacement Using
+# Re-Reference Interval Prediction (RRIP)", ISCA 2010.
+
+#: Bits of re-reference prediction value per way (M in the paper).
+RRPV_BITS = 2
+#: "Distant" re-reference prediction: the way is the next victim.
+RRPV_DISTANT = (1 << RRPV_BITS) - 1  # 3
+#: "Long" re-reference prediction: what SRRIP inserts with.
+RRPV_LONG = RRPV_DISTANT - 1  # 2
+#: "Near-immediate" prediction: what a hit promotes to.
+RRPV_NEAR = 0
+#: BRRIP inserts with RRPV_LONG once every ``BRRIP_EPSILON`` fills.
+BRRIP_EPSILON = 32
+
+
+class _RRIP(ReplacementPolicy):
+    """Shared machinery for the RRIP family (Jaleel et al., ISCA 2010).
+
+    Each way carries a 2-bit re-reference prediction value (RRPV): 0 means
+    "will be re-referenced in the near future", 3 means "in the distant
+    future", so 3 marks the preferred victim. A hit promotes the way to 0
+    (hit priority, the paper's SRRIP-HP). To find a victim the set is
+    scanned for the first way at 3; if there is none, every RRPV in the set
+    is incremented (ageing the whole set at once) and the scan repeats, so
+    at most three increments are ever needed.
+
+    The insertion value is what separates the family members and is chosen
+    by ``_insert_rrpv``.
+    """
+
+    def __init__(self, num_sets: int, num_ways: int, rng: random.Random | None = None) -> None:
+        super().__init__(num_sets, num_ways, rng)
+        self._rrpv = [[RRPV_DISTANT] * num_ways for _ in range(num_sets)]
+
+    def _insert_rrpv(self, set_idx: int) -> int:
+        raise NotImplementedError
+
+    def on_hit(self, set_idx: int, way: int, block: int) -> None:
+        self._rrpv[set_idx][way] = RRPV_NEAR
+
+    def on_fill(self, set_idx: int, way: int, block: int) -> None:
+        self._rrpv[set_idx][way] = self._insert_rrpv(set_idx)
+
+    def on_invalidate(self, set_idx: int, way: int) -> None:
+        # An empty way is the best possible victim: predict a distant
+        # re-reference so the state stays truthful if it is ever scanned.
+        self._rrpv[set_idx][way] = RRPV_DISTANT
+
+    def victim(self, set_idx: int) -> int:
+        rrpv = self._rrpv[set_idx]
+        num_ways = self.num_ways
+        while True:
+            for way in range(num_ways):
+                if rrpv[way] == RRPV_DISTANT:
+                    return way
+            for way in range(num_ways):
+                rrpv[way] += 1
+
+
+class SRRIPPolicy(_RRIP):
+    """Static RRIP: insert every block predicting a long re-reference interval.
+
+    A newly filled block starts at RRPV 2 rather than 0, so it must be
+    re-referenced before it is aged to 3 to earn a place. That makes the
+    policy scan-resistant: a burst of one-touch blocks cycles through the
+    same handful of ways at RRPV 2->3 while blocks that have been hit sit at
+    0 and survive, whereas LRU installs every scan block as most recently
+    used and flushes the whole set.
+    """
+
+    def _insert_rrpv(self, set_idx: int) -> int:
+        return RRPV_LONG
+
+
+class BRRIPPolicy(_RRIP):
+    """Bimodal RRIP: insert predicting a *distant* re-reference interval,
+    except once every ``BRRIP_EPSILON`` fills.
+
+    A block inserted at RRPV 3 is the next victim, so a thrashing working
+    set (one larger than the set) keeps most of its blocks resident instead
+    of evicting all of them in turn: the cache preserves a fraction of the
+    working set rather than cycling. The occasional insertion at RRPV 2
+    (probability 1/32, drawn from the cache's seeded RNG) is what lets the
+    resident set change over time.
+    """
+
+    def _insert_rrpv(self, set_idx: int) -> int:
+        if self.rng.randrange(BRRIP_EPSILON) == 0:
+            return RRPV_LONG
+        return RRPV_DISTANT
+
+
+class DRRIPPolicy(_RRIP):
+    """Dynamic RRIP: run SRRIP and BRRIP against each other and follow the winner.
+
+    Set dueling (Qureshi, Jaleel, Patt, Steely and Emer, "Adaptive Insertion
+    Policies for High Performance Caching", ISCA 2007; reused for RRIP by
+    Jaleel et al., ISCA 2010): a few sets always insert the SRRIP way, a few
+    always insert the BRRIP way, and a saturating counter records which
+    group is missing more. Every other set (the followers) uses whichever
+    insertion policy is currently winning, so the cache pays the cost of the
+    losing policy on the leader sets only.
+
+    Leader sets, chosen by set index so no state is needed:
+
+    * ``num_sets >= 64``: ``set_idx % 64 == 0`` leads SRRIP and
+      ``set_idx % 64 == 32`` leads BRRIP -- 1/32 of the cache duels, spread
+      evenly, which is the sampling ratio used in the paper.
+    * ``2 <= num_sets < 64``: set 0 leads SRRIP and set ``num_sets // 2``
+      leads BRRIP, so a small cache still duels. With two sets there are no
+      followers left and the result is simply one set of each.
+    * ``num_sets == 1``: dueling is impossible; the single set is a follower
+      and PSEL never moves, so DRRIP degenerates to SRRIP.
+
+    PSEL is a 10-bit saturating counter, incremented on a fill into an SRRIP
+    leader set and decremented on a fill into a BRRIP leader set (a fill is
+    a miss: the line was not resident). High means SRRIP is missing more, so
+    followers use BRRIP when the top bit is set. It starts at 511, one below
+    the midpoint, so that before any evidence has accumulated the followers
+    run SRRIP.
+    """
+
+    #: Width of the policy selection counter.
+    PSEL_BITS = 10
+    PSEL_MAX = (1 << PSEL_BITS) - 1
+    #: Followers use BRRIP once PSEL reaches this (the top bit is set).
+    PSEL_THRESHOLD = 1 << (PSEL_BITS - 1)
+    #: One set in ``LEADER_PERIOD`` leads each policy when there is room.
+    LEADER_PERIOD = 64
+
+    _FOLLOWER = 0
+    _SRRIP_LEADER = 1
+    _BRRIP_LEADER = 2
+
+    def __init__(self, num_sets: int, num_ways: int, rng: random.Random | None = None) -> None:
+        super().__init__(num_sets, num_ways, rng)
+        self.psel = self.PSEL_THRESHOLD - 1
+        self._role = [self._FOLLOWER] * num_sets
+        if num_sets >= self.LEADER_PERIOD:
+            for set_idx in range(num_sets):
+                if set_idx % self.LEADER_PERIOD == 0:
+                    self._role[set_idx] = self._SRRIP_LEADER
+                elif set_idx % self.LEADER_PERIOD == self.LEADER_PERIOD // 2:
+                    self._role[set_idx] = self._BRRIP_LEADER
+        elif num_sets >= 2:
+            self._role[0] = self._SRRIP_LEADER
+            self._role[num_sets // 2] = self._BRRIP_LEADER
+
+    #: Role names, indexed by the internal role code.
+    ROLE_NAMES = ("follower", "srrip-leader", "brrip-leader")
+
+    def role_of(self, set_idx: int) -> str:
+        """Which side of the duel a set is on: see ``ROLE_NAMES``."""
+        return self.ROLE_NAMES[self._role[set_idx]]
+
+    def following(self) -> str:
+        """The insertion policy the follower sets are using right now."""
+        return "srrip" if self.psel < self.PSEL_THRESHOLD else "brrip"
+
+    def _bimodal(self) -> int:
+        if self.rng.randrange(BRRIP_EPSILON) == 0:
+            return RRPV_LONG
+        return RRPV_DISTANT
+
+    def _insert_rrpv(self, set_idx: int) -> int:
+        role = self._role[set_idx]
+        if role == self._SRRIP_LEADER:
+            # Missing in an SRRIP leader is evidence against SRRIP.
+            if self.psel < self.PSEL_MAX:
+                self.psel += 1
+            return RRPV_LONG
+        if role == self._BRRIP_LEADER:
+            if self.psel > 0:
+                self.psel -= 1
+            return self._bimodal()
+        if self.psel < self.PSEL_THRESHOLD:
+            return RRPV_LONG  # SRRIP is winning
+        return self._bimodal()
+
+
 #: Registry of selectable policies, keyed by the name used in configs.
 POLICIES: dict[str, type[ReplacementPolicy]] = {
     "lru": LRUPolicy,
@@ -279,5 +462,8 @@ POLICIES: dict[str, type[ReplacementPolicy]] = {
     "nru": NRUPolicy,
     "lfu": LFUPolicy,
     "mru": MRUPolicy,
+    "srrip": SRRIPPolicy,
+    "brrip": BRRIPPolicy,
+    "drrip": DRRIPPolicy,
     "random": RandomPolicy,
 }
