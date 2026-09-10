@@ -2,11 +2,38 @@
 
 from __future__ import annotations
 
+import random
 import unittest
 from unittest import mock
 
+from cachesim.cache import Cache
+from cachesim.hierarchy import Hierarchy, Level
 from cachesim.policies import POLICIES, ReplacementPolicy
 from tests.helpers import block_addr, tiny_cache
+
+
+def one_set_cache(ways: int, policy: str, block: int = 16) -> Cache:
+    """A cache that is a single set: every block competes with every other."""
+    return Cache("S", size=ways * block, block_size=block, associativity=ways, policy=policy)
+
+
+def resident_blocks(cache: Cache) -> set[int]:
+    """The block numbers currently held, ignoring where they sit."""
+    return {block for _, _, block, _ in cache.lines()}
+
+
+def cyclic_scan(cache: Cache, num_blocks: int, passes: int) -> list[int]:
+    """Reference blocks 0..num_blocks-1 in order, ``passes`` times.
+
+    Returns the miss count of each pass.
+    """
+    per_pass = []
+    for _ in range(passes):
+        before = cache.misses
+        for block in range(num_blocks):
+            cache.access(block * cache.block_size)
+        per_pass.append(cache.misses - before)
+    return per_pass
 
 
 class TestReplacementPolicies(unittest.TestCase):
@@ -63,6 +90,188 @@ class TestReplacementPolicies(unittest.TestCase):
             self.assertTrue(c.access(block_addr(c, 0, 2)))
             self.assertFalse(c.access(block_addr(c, 0, 1)))
         self.assertNotIn("way0", POLICIES)
+
+
+class TestTreePLRU(unittest.TestCase):
+    """Tree pseudo-LRU: num_ways-1 bits per set, victim follows the bits."""
+
+    def test_plru_and_lru_disagree_on_the_classic_four_way_sequence(self) -> None:
+        # 4-way single set, references a, b, c, d, a, e. True LRU evicts b
+        # (untouched longest). PLRU evicts c: touching a flips the root to
+        # point at the {c,d} half and the {c,d} bit still points at c, so
+        # the fact that c was used more recently than b is not recorded.
+        sequence = [1, 2, 3, 4, 1, 5]  # tags a, b, c, d, a, e
+        plru = one_set_cache(ways=4, policy="plru")
+        lru = one_set_cache(ways=4, policy="lru")
+        for tag in sequence:
+            plru.access(tag * plru.block_size)
+            lru.access(tag * lru.block_size)
+        self.assertEqual(resident_blocks(plru), {1, 2, 4, 5})  # c (3) evicted
+        self.assertEqual(resident_blocks(lru), {1, 3, 4, 5})  # b (2) evicted
+        self.assertEqual((plru.hits, plru.misses), (1, 5))
+        self.assertEqual((lru.hits, lru.misses), (1, 5))
+
+    def test_plru_fills_ways_in_tree_order_from_the_reset_state(self) -> None:
+        # All bits clear means "victim to the left" at every node, so the
+        # first victim of a cold, full set is way 0.
+        c = one_set_cache(ways=4, policy="plru")
+        for tag in (1, 2, 3, 4):  # fills ways 0..3 in order
+            c.access(tag * c.block_size)
+        # Filling way 3 last leaves the root pointing at the {0,1} half and
+        # that half pointing at way 0.
+        self.assertEqual(c.policy.victim(0), 0)
+
+    def test_plru_is_exact_lru_at_two_ways(self) -> None:
+        # One bit per set is enough to record the full order of two ways, so
+        # tree-PLRU degenerates to true LRU. Cross-check on a random stream.
+        rng = random.Random(11)
+        stream = [rng.randrange(6) for _ in range(400)]
+        plru = Cache("P", size=8 * 16, block_size=16, associativity=2, policy="plru")
+        lru = Cache("L", size=8 * 16, block_size=16, associativity=2, policy="lru")
+        for block in stream:
+            plru.access(block * 16)
+            lru.access(block * 16)
+        self.assertEqual(plru.misses, lru.misses)
+        self.assertEqual(resident_blocks(plru), resident_blocks(lru))
+
+    def test_plru_rejects_a_non_power_of_two_associativity(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            Cache("L1", size=3 * 16, block_size=16, associativity=3, policy="plru")
+        self.assertIn("power-of-two", str(ctx.exception))
+
+    def test_plru_points_at_an_invalidated_way(self) -> None:
+        c = one_set_cache(ways=4, policy="plru")
+        for tag in (1, 2, 3, 4):
+            c.access(tag * c.block_size)
+        c.invalidate(3)  # empties way 2
+        self.assertEqual(c.policy.victim(0), 2)
+
+
+class TestNRU(unittest.TestCase):
+    """One reference bit per way; evict the lowest way whose bit is clear."""
+
+    def test_nru_evicts_the_recently_used_block_when_every_bit_is_set(self) -> None:
+        # 2-way, references a, b, a. Both bits are set (a by its hit, b by
+        # its fill), so c clears them and takes way 0, which holds a. LRU
+        # would have evicted b.
+        c = one_set_cache(ways=2, policy="nru")
+        for tag in (1, 2, 1, 3):
+            c.access(tag * c.block_size)
+        self.assertEqual(resident_blocks(c), {2, 3})  # a (1) was the victim
+        self.assertEqual((c.hits, c.misses), (1, 3))
+
+    def test_nru_prefers_a_way_whose_bit_is_clear(self) -> None:
+        # After the sweep that cleared every bit, only the refilled way is
+        # marked, so the next victim is the lowest unmarked way.
+        c = one_set_cache(ways=4, policy="nru")
+        for tag in (1, 2, 3, 4, 5):  # the fifth fill clears all bits, takes way 0
+            c.access(tag * c.block_size)
+        self.assertEqual(c.policy.victim(0), 1)  # way 0 was just re-referenced
+        c.access(2 * c.block_size)  # hit in way 1: sets its bit again
+        self.assertEqual(c.policy.victim(0), 2)
+
+    def test_nru_clears_the_bit_of_an_invalidated_way(self) -> None:
+        c = one_set_cache(ways=2, policy="nru")
+        c.access(1 * c.block_size)
+        c.access(2 * c.block_size)
+        c.invalidate(1)  # way 0
+        self.assertEqual(c.policy.victim(0), 0)
+
+
+class TestLFU(unittest.TestCase):
+    """Per-way reference counters, no aging."""
+
+    def test_lfu_evicts_the_least_referenced_block(self) -> None:
+        # 2-way: a is referenced three times (count 3), b once (count 1), so
+        # b is the victim even though it is the more recent of the two.
+        c = one_set_cache(ways=2, policy="lfu")
+        for tag in (1, 1, 1, 2, 3):
+            c.access(tag * c.block_size)
+        self.assertEqual(resident_blocks(c), {1, 3})  # b (2) was the victim
+        self.assertEqual((c.hits, c.misses), (2, 3))
+
+    def test_lfu_breaks_count_ties_with_the_lowest_way(self) -> None:
+        c = one_set_cache(ways=4, policy="lfu")
+        for tag in (1, 2, 3, 4):  # every count is 1
+            c.access(tag * c.block_size)
+        self.assertEqual(c.policy.victim(0), 0)
+
+    def test_lfu_counters_do_not_age(self) -> None:
+        # The classic weakness: a block that was hot long ago keeps its
+        # score and cannot be displaced by a stream of one-touch blocks.
+        c = one_set_cache(ways=2, policy="lfu")
+        hot = 1
+        for _ in range(5):
+            c.access(hot * c.block_size)  # count 5
+        for tag in range(2, 20):  # each newcomer arrives with count 1
+            c.access(tag * c.block_size)
+        self.assertIn(hot, resident_blocks(c))
+
+
+class TestMRU(unittest.TestCase):
+    """Evict the most recently used way: the cyclic-scan counter-example."""
+
+    def test_mru_beats_lru_on_a_cyclic_scan_one_block_too_large(self) -> None:
+        # C+1 distinct blocks scanned repeatedly over a C-way set. LRU
+        # evicts exactly the block that is referenced next, so every access
+        # after the first pass misses. MRU keeps C-1 blocks pinned and
+        # sacrifices the same way, so it misses about once per pass.
+        ways, passes = 4, 10
+        blocks = ways + 1
+        lru = cyclic_scan(one_set_cache(ways, "lru"), blocks, passes)
+        mru = cyclic_scan(one_set_cache(ways, "mru"), blocks, passes)
+        self.assertEqual(lru, [5] * passes)  # 100% miss, every pass
+        self.assertEqual(mru, [5, 1, 1, 1, 2, 1, 1, 1, 2, 1])
+        self.assertEqual((sum(lru), sum(mru)), (50, 16))
+
+    def test_mru_cyclic_scan_matches_its_closed_form(self) -> None:
+        # Measured: after the cold pass, MRU misses once per pass except
+        # every C-th pass, which misses twice, i.e.
+        #     misses(P) = (C+1) + (P-1) + floor((P-1)/C).
+        for ways in (2, 3, 4, 8):
+            for passes in (1, 2, 5, 9, 10, 17):
+                measured = sum(cyclic_scan(one_set_cache(ways, "mru"), ways + 1, passes))
+                predicted = (ways + 1) + (passes - 1) + (passes - 1) // ways
+                self.assertEqual(measured, predicted, f"ways={ways} passes={passes}")
+
+
+class TestEveryPolicy(unittest.TestCase):
+    """Invariants that every entry in the registry must satisfy."""
+
+    names = sorted(POLICIES)
+
+    def test_an_invalidated_way_is_refilled_before_any_eviction(self) -> None:
+        # Emptying a way must leave the policy consistent: the next fill
+        # takes the free way instead of evicting a resident block.
+        for name in self.names:
+            with self.subTest(policy=name):
+                c = one_set_cache(ways=4, policy=name)
+                for tag in (1, 2, 3, 4):
+                    c.access(tag * c.block_size)
+                c.invalidate(2)
+                c.access(9 * c.block_size)  # must use the way freed by 2
+                self.assertEqual(c.evictions, 0)
+                self.assertEqual(resident_blocks(c), {1, 3, 4, 9})
+
+    def test_every_policy_works_at_every_level_of_a_hierarchy(self) -> None:
+        rng = random.Random(3)
+        stream = [(rng.randrange(400) * 64, rng.random() < 0.3) for _ in range(2000)]
+        for name in self.names:
+            with self.subTest(policy=name):
+                h = Hierarchy(
+                    [
+                        Level(Cache("L1", 1024, 64, 4, policy=name), 4),
+                        Level(Cache("L2", 4096, 64, 8, policy=name), 12),
+                    ],
+                    memory_access_time=100,
+                )
+                for addr, is_write in stream:
+                    h.access(addr, is_write)
+                self.assertEqual(h.accesses, len(stream))
+                l1, l2 = h.levels[0].cache, h.levels[1].cache
+                self.assertEqual(l1.hits + l1.misses, len(stream))
+                self.assertEqual(l2.accesses, l1.misses)
+                self.assertEqual(l1.fills, l1.misses)
 
 
 if __name__ == "__main__":

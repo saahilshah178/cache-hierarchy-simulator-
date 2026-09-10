@@ -143,11 +143,17 @@ class Cache:
             raise ValueError(f"{name}: rng_seed must be an integer, got {rng_seed!r}")
         rng = random.Random(rng_seed)
         try:
-            self.policy: ReplacementPolicy = POLICIES[policy](self.num_sets, associativity, rng)
+            policy_class = POLICIES[policy]
         except KeyError:
             raise ValueError(
                 f"unknown replacement policy {policy!r}; choose from {sorted(POLICIES)}"
             ) from None
+        try:
+            self.policy: ReplacementPolicy = policy_class(self.num_sets, associativity, rng)
+        except ValueError as exc:
+            # e.g. plru rejecting a non-power-of-two associativity: name the
+            # level so the message identifies which one is misconfigured.
+            raise ValueError(f"{name}: {exc}") from None
 
         # Cache contents, indexed [set][way]: the block number held in each
         # way (EMPTY for an invalid way) and its dirty bit.
