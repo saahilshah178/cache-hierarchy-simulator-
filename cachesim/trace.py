@@ -85,6 +85,19 @@ _EXTENSIONS = {".din": "dinero", ".lackey": "lackey", ".vg": "lackey"}
 _HEX = re.compile(r"(?:0[xX])?[0-9A-Fa-f]+")
 _LACKEY_LINE = re.compile(r"([ILSM])[ \t]+((?:0[xX])?[0-9A-Fa-f]+),[0-9]+")
 
+#: A whole native line with nothing to clean up: an address, one space, R or
+#: W. Written in terms of ``_HEX`` so the address it accepts is by
+#: construction the address the general path accepts, and matched with
+#: ``fullmatch`` so nothing else can be on the line. A line that matches is
+#: decided in one C call; see ``_parse_native`` for why that is sound.
+_NATIVE_LINE = re.compile(rf"({_HEX.pattern}) ([RW])")
+
+#: Characters the native reader pulls from the file at a time. Reading in
+#: blocks and splitting them is measurably faster than iterating the file
+#: line by line, and unlike reading the whole file it keeps the memory a
+#: stream costs bounded, which ``open_trace`` promises.
+_READ_CHUNK = 1 << 20
+
 #: Dinero IV reference labels: instruction fetches count as reads.
 _DINERO_LABELS = {"0": False, "1": True, "2": False}
 #: Lackey record kinds; a modify is decoded as one write (see module docstring).
@@ -112,10 +125,55 @@ def _open_text(path: str) -> TextIO:
     return open(path)
 
 
+def _read_lines(f: TextIO) -> Iterator[str]:
+    """Yield ``f``'s lines without their terminators, a block at a time.
+
+    The same sequence of strings as ``(line.removesuffix("\\n") for line in
+    f)``, produced by reading ``_READ_CHUNK`` characters at a time and
+    splitting each block on ``"\\n"``, with whatever the block cut in half
+    carried over to the next one.
+
+    Splitting on ``"\\n"`` and not with ``str.splitlines`` is the point:
+    ``splitlines`` also breaks on ``\\v``, ``\\f``, ``\\x1c``, ``\\x85``,
+    ``\\u2028`` and more, none of which ends a line for a file object, and
+    breaking on one would quietly turn a malformed line into two. Carriage
+    returns need no special handling because the text layer has already
+    translated them, exactly as it does for iteration.
+    """
+    rest = ""
+    while True:
+        chunk = f.read(_READ_CHUNK)
+        if not chunk:
+            if rest:
+                yield rest  # a last line with no terminator
+            return
+        lines = (rest + chunk).split("\n")
+        rest = lines.pop()  # the block ended mid-line (or exactly on "\n")
+        yield from lines
+
+
 def _parse_native(path: str) -> Iterator[tuple[int, bool]]:
-    """Yield ``(address, is_write)`` from a native-format trace."""
+    """Yield ``(address, is_write)`` from a native-format trace.
+
+    A line that ``_NATIVE_LINE`` matches -- an address, a single space, an
+    upper-case R or W, and nothing else -- is decoded from the match and
+    skips the rest of this function. That is not a second definition of the
+    format but a subset of this one: such a line contains no ``#`` and no
+    leading or trailing space, so stripping it changes nothing; it splits
+    into exactly two fields; its address matches ``_HEX`` by construction,
+    is ASCII, and carries no sign, so ``int(..., 16)`` returns the same
+    non-negative number the checks below would have accepted; and its op is
+    already upper case. Every other line -- lower-case ops, comments,
+    padding, and everything malformed -- falls through to the general path,
+    which decides what the format is and produces every error message.
+    """
+    fullmatch = _NATIVE_LINE.fullmatch
     with _open_text(path) as f:
-        for lineno, raw in enumerate(f, start=1):
+        for lineno, raw in enumerate(_read_lines(f), start=1):
+            match = fullmatch(raw)
+            if match is not None:
+                yield int(match[1], 16), match[2] == "W"
+                continue
             line = raw.split("#", 1)[0].strip()
             if not line:
                 continue

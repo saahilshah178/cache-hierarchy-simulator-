@@ -10,6 +10,7 @@ import os
 import tempfile
 import unittest
 from typing import ClassVar
+from unittest import mock
 
 from cachesim import run_trace
 from cachesim.cli import main
@@ -87,6 +88,163 @@ class TestTraceParsing(TraceFileCase):
         with self.assertRaises(ValueError) as ctx:
             self.parse("0x10 R\n0x20 R\nbogus\n")
         self.assertIn("t.trace:3", str(ctx.exception))
+
+
+class TestNativeFastPath(TraceFileCase):
+    """``_NATIVE_LINE`` must accept a strict subset of the format.
+
+    The reader decodes a line the pattern matches without running any of
+    the checks below it, so a line it accepts and the general path rejects
+    -- or decodes differently -- would be a silently wrong trace. The
+    corpus here is built from the ways a line can look almost canonical.
+    """
+
+    def parse(self, text: str) -> list[tuple[int, bool]]:
+        return self.parse_file("t.trace", text)
+
+    #: Lines the fast path must not take, each with the reason.
+    NOT_CANONICAL: ClassVar[dict[str, str]] = {
+        "0x0x123456 R": "a second 0x prefix, which int() accepts and _HEX does not",
+        "0x  123456 R": "int() ignores surrounding space; the field split does not",
+        "0x 123456 R": "three fields, not two",
+        "0x12_3456 R": "int() accepts underscores; the format does not",
+        "+0x123456 R": "a sign",
+        "-0x123456 R": "a sign",
+        "0x123456 r": "a lower-case op reaches the general path",
+        "0x123456 X": "not an op at all",
+        "0x123456 R # note": "a comment has to be stripped first",
+        " 0x123456 R": "leading space",
+        "0x123456 R ": "trailing space",
+        "0x123456\tR": "a tab, not a space",
+        "0x123456  R": "two spaces",
+        "0xZZ R": "not hex",
+        "0x R": "a prefix with no digits",
+        "\uff10x10 R": "non-ASCII digits",
+        "0x123456": "one field",
+        "0x123456 R 8": "three fields",
+    }
+
+    def test_the_pattern_matches_only_canonical_lines(self) -> None:
+        from cachesim.trace import _NATIVE_LINE
+
+        for line, reason in self.NOT_CANONICAL.items():
+            with self.subTest(line=line, reason=reason):
+                self.assertIsNone(_NATIVE_LINE.fullmatch(line))
+        for line in ("0x123456 R", "123456 W", "0XABCDEF R", "0 W", "ffffffffffffffff R"):
+            with self.subTest(line=line):
+                self.assertIsNotNone(_NATIVE_LINE.fullmatch(line))
+
+    def test_every_awkward_line_parses_as_before(self) -> None:
+        """Whatever each corpus line means, it must still mean it.
+
+        The fast path may not change a value, and it may not turn an error
+        into a value or the other way round, so each line is parsed on its
+        own and the outcome compared with what the format's rules say it
+        is.
+        """
+        expected: dict[str, list[tuple[int, bool]] | str] = {
+            "0x0x123456 R": "error",
+            "0x  123456 R": "error",
+            "0x 123456 R": "error",
+            "0x12_3456 R": "error",
+            "+0x123456 R": "error",
+            "-0x123456 R": "error",
+            "0x123456 r": [(0x123456, False)],
+            "0x123456 X": "error",
+            "0x123456 R # note": [(0x123456, False)],
+            " 0x123456 R": [(0x123456, False)],
+            "0x123456 R ": [(0x123456, False)],
+            "0x123456\tR": [(0x123456, False)],
+            "0x123456  R": [(0x123456, False)],
+            "0xZZ R": "error",
+            "0x R": "error",
+            "\uff10x10 R": "error",
+            "0x123456": "error",
+            "0x123456 R 8": "error",
+        }
+        self.assertEqual(sorted(expected), sorted(self.NOT_CANONICAL))
+        for line, outcome in expected.items():
+            with self.subTest(line=line):
+                if outcome == "error":
+                    with self.assertRaises(ValueError):
+                        self.parse(f"{line}\n")
+                else:
+                    self.assertEqual(self.parse(f"{line}\n"), outcome)
+
+    def test_a_canonical_line_decodes_to_the_same_pair(self) -> None:
+        for text, pair in (
+            ("0x00400000 R", (0x400000, False)),
+            ("0x00400000 W", (0x400000, True)),
+            ("0XdeadBEEF R", (0xDEADBEEF, False)),
+            ("400000 W", (0x400000, True)),
+            ("0 R", (0, False)),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.parse(f"{text}\n"), [pair])
+
+    def test_line_numbers_survive_the_fast_path(self) -> None:
+        # The bad line follows a thousand canonical ones, so the count has
+        # to be kept by lines the fast path consumed as well.
+        good = "".join(f"0x{addr:08x} R\n" for addr in range(0, 64000, 64))
+        with self.assertRaises(ValueError) as ctx:
+            self.parse(good + "bogus\n")
+        self.assertIn("t.trace:1001", str(ctx.exception))
+
+
+class TestChunkedLineReader(TraceFileCase):
+    """``_read_lines`` must yield exactly what iterating the file yields.
+
+    It reads blocks and splits them, so the cases that matter are the ones
+    where a block boundary falls somewhere awkward and where a character
+    that ``str.splitlines`` would treat as a line break appears in the
+    text.
+    """
+
+    BODIES: ClassVar[tuple[str, ...]] = (
+        "",
+        "\n",
+        "a\n",
+        "a",
+        "a\nb\n",
+        "a\nb",
+        "\n\n\n",
+        "a\r\nb\r\n",  # CRLF, translated by the text layer
+        "a\rb\r",  # bare CR, likewise
+        "a\r\n\r\nb",
+        "x\x0bv\x0cf\x1cs\x85n\u2028p\n",  # splitlines would break on all of these
+        "\ufeffbom\n",
+        "a" * 5000 + "\n" + "b" * 5000,  # longer than the test block size
+    )
+
+    def test_matches_line_iteration_at_every_block_size(self) -> None:
+        from cachesim import trace as trace_module
+
+        for body in self.BODIES:
+            path = self.write("lines.txt", body)
+            with open(path) as f:
+                expected = [line.removesuffix("\n") for line in f]
+            for chunk in (1, 2, 3, 7, 4096):
+                with (
+                    self.subTest(body=body, chunk=chunk),
+                    mock.patch.object(trace_module, "_READ_CHUNK", chunk),
+                    open(path) as f,
+                ):
+                    self.assertEqual(list(trace_module._read_lines(f)), expected)
+
+    def test_a_trace_spanning_many_blocks_parses_whole(self) -> None:
+        from cachesim import trace as trace_module
+
+        text = "".join(
+            f"0x{addr:08x} {'W' if addr % 128 else 'R'}\n" for addr in range(0, 8192, 64)
+        )
+        expected = [(addr, bool(addr % 128)) for addr in range(0, 8192, 64)]
+        path = self.write("many.trace", text)
+        for chunk in (1, 5, 13, 64, 1 << 20):
+            with (
+                self.subTest(chunk=chunk),
+                mock.patch.object(trace_module, "_READ_CHUNK", chunk),
+            ):
+                self.assertEqual(list(parse_trace(path)), expected)
 
 
 class TestDineroParsing(TraceFileCase):
