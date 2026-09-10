@@ -151,9 +151,9 @@ class RowBufferMemory(MemoryModel):
     """Open-page DRAM: one activated row per bank.
 
     A block's row is ``block_addr // row_size`` and its bank is
-    ``row // banks``'s remainder, so consecutive rows land in different
-    banks and a scan long enough to leave one row still finds the next in
-    a bank of its own. An access whose row is already open costs
+    ``row % banks``, so consecutive rows land in different banks and a
+    scan long enough to leave one row still finds the next in a bank of
+    its own. An access whose row is already open costs
     ``row_hit`` cycles; otherwise it costs ``row_miss``, and that row
     becomes the open one for its bank -- there is no separate precharge
     penalty for the row it displaced, so ``row_miss`` stands for
