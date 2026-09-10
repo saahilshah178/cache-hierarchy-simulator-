@@ -34,7 +34,7 @@ from cachesim.stackdist import (
     stack_distances,
 )
 from cachesim.workloads import (
-    SAMPLE_TRACES,
+    SAMPLE_NAMES,
     conflict_streams,
     matmul,
     pointer_chase,
@@ -315,8 +315,8 @@ class TestBlockStream(unittest.TestCase):
             block_stream([(0, False)], 0)
 
     def test_sample_traces_are_all_covered(self) -> None:
-        """small_samples() must track SAMPLE_TRACES so no workload is skipped."""
-        self.assertEqual({name for name, _ in small_samples()}, set(SAMPLE_TRACES))
+        """small_samples() must track SAMPLE_NAMES so no workload is skipped."""
+        self.assertEqual({name for name, _ in small_samples()}, set(SAMPLE_NAMES))
 
 
 class TestPowerOfTwoCapacities(unittest.TestCase):
