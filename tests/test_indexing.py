@@ -65,6 +65,19 @@ class TestIndexFunctions(unittest.TestCase):
         index = xor_index(1)
         self.assertEqual([index(b) for b in (0, 1, 7, 1 << 40)], [0, 0, 0, 0])
 
+    def test_the_two_functions_disagree_on_a_negative_block(self) -> None:
+        # A negative block cannot come from an address (Cache.access and
+        # Hierarchy.access reject a negative one), but nothing stops a caller
+        # from handing probe/allocate/set_of a hand-made block. Neither answer
+        # below is meaningful; this pins what the docstrings claim, so the two
+        # cannot silently drift apart.
+        self.assertEqual(modulo_index(128)(-1), 127)  # Python's % takes the
+        self.assertEqual(modulo_index(4)(-5), 3)  # sign of the divisor
+        self.assertEqual(xor_index(128)(-1), 0)  # the fold consumes nothing
+        self.assertEqual(xor_index(4)(-5), 0)
+        with self.assertRaises(ValueError):
+            Cache("L1", 4096, 64, 1).access(-1)
+
     def test_make_index_rejects_an_unknown_name(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             make_index("crc", 128)

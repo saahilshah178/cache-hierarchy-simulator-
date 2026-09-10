@@ -30,8 +30,14 @@ callable ``block -> set index``:
     index = make_index("xor", num_sets=128)
     index(4096)
 
-Block numbers are non-negative; negative arguments are not meaningful and
-map to set 0.
+Block numbers are non-negative: ``Cache.access`` and ``Hierarchy.access``
+reject a negative address before a block number is formed, so a negative
+argument can only come from a caller that builds one by hand and reaches
+``probe``/``allocate``/``set_of`` directly. No index function rejects it,
+and the two disagree about what it means -- ``modulo_index`` returns
+``num_sets - 1`` for block -1 (Python's ``%`` takes the sign of the
+divisor), while ``xor_index`` returns 0. Neither answer models anything;
+do not depend on either.
 """
 
 from __future__ import annotations
@@ -46,7 +52,9 @@ IndexFunction: TypeAlias = Callable[[int], int]
 def modulo_index(num_sets: int) -> IndexFunction:
     """``block % num_sets``: the low-order bits of the block number.
 
-    Defined for any positive set count, not only powers of two.
+    Defined for any positive set count, not only powers of two. A negative
+    block is not rejected and not meaningful: Python's ``%`` takes the sign
+    of the divisor, so block -1 maps to ``num_sets - 1``, not to 0.
     """
     if num_sets < 1:
         raise ValueError(f"num_sets must be positive, got {num_sets}")
@@ -64,6 +72,10 @@ def xor_index(num_sets: int) -> IndexFunction:
     all of them are XOR-ed, so every bit of the block number reaches the
     index. Requires a power-of-two set count, because the fold is defined on
     bit-fields; a one-set cache is fully associative and always yields 0.
+
+    The fold consumes chunks while the block is positive, so a negative
+    block -- which cannot arise from an address, see the module docstring --
+    is not rejected and folds to 0.
     """
     if num_sets < 1:
         raise ValueError(f"num_sets must be positive, got {num_sets}")
