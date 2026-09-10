@@ -48,6 +48,11 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
     else:
         detail = f"(dirty lines written back from {s.levels[-1].name})"
     lines.append(f"DRAM writes    : {s.dram_writes:>12,}   {detail}")
+    if s.dram_prefetch_reads:
+        lines.append(
+            f"DRAM prefetches: {s.dram_prefetch_reads:>12,}"
+            "   (speculative fetches that missed every level; untimed)"
+        )
     lines.append("")
 
     for i, lv in enumerate(s.levels):
@@ -60,6 +65,8 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
             extra += ", no-write-allocate"
         if lv.bus_width is not None:
             extra += f", {lv.bus_width} B/cyc bus ({lv.transfer_cycles} cyc/block)"
+        if lv.prefetcher != "none":
+            extra += f", {lv.prefetcher} prefetch"
         lines.append(
             f"--- {lv.name}: {_size_str(lv.size)}, {lv.block_size} B blocks, "
             f"{lv.associativity}-way, {lv.policy.upper()}, hit time {lv.hit_time} cyc"
@@ -107,6 +114,22 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
             f"  traffic     : {_size_str(lv.bytes_read_from_below):>12} in from below"
             f" / {_size_str(lv.bytes_written_below)} out below"
         )
+        if lv.prefetcher != "none":
+            lines.append(
+                f"  prefetches issued   : {lv.prefetches_issued:>6,}"
+                f"   (useful {lv.prefetch_hits:,},"
+                f" evicted unused {lv.prefetch_evicted_unused:,})"
+            )
+            lines.append(
+                f"    accuracy  : {100 * lv.prefetch_accuracy:6.2f}%   (useful / issued)"
+                f"    coverage : {100 * lv.prefetch_coverage:6.2f}%"
+                "   (useful / (useful + demand misses))"
+            )
+        if lv.prefetch_probes:
+            lines.append(
+                f"  prefetch lookups    : {lv.prefetch_probes:>6,}"
+                f"   (from a level above; {lv.prefetch_probe_hits:,} found the block here)"
+            )
         c3 = lv.three_c
         if c3 is not None and lv.misses:
             lines.append(f"  miss classification     {'per-reference':>14} {'aggregate':>12}")

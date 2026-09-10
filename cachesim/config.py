@@ -32,6 +32,7 @@ key                     default        effect
 ``write_policy``        ``"write-back"``  when stores reach the level below
 ``write_allocate``      ``true``       whether a write miss allocates here
 ``bus_width``           ``null``       bytes/cycle of the link from below
+``prefetcher``          ``"none"``     hardware prefetcher at this level
 ======================  =============  ==================================
 """
 
@@ -45,6 +46,7 @@ from typing import Any
 
 from cachesim.indexing import DEFAULT_INDEX, INDEX_FUNCTIONS
 from cachesim.policies import POLICIES
+from cachesim.prefetch import PREFETCHER_NAMES
 
 
 class ConfigError(ValueError):
@@ -99,6 +101,8 @@ class CacheSpec:
     (see ``WRITE_POLICIES``). ``bus_width`` is the width in bytes per cycle
     of the link that carries blocks from the level below INTO this level;
     ``None`` models an infinitely wide link, adding no transfer term.
+    ``prefetcher`` names the hardware prefetcher watching this level (see
+    ``cachesim.prefetch``).
     """
 
     name: str
@@ -114,6 +118,7 @@ class CacheSpec:
     write_policy: str = "write-back"
     write_allocate: bool = True
     bus_width: int | None = None
+    prefetcher: str = "none"
 
 
 @dataclass(frozen=True)
@@ -257,6 +262,14 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
         raise ConfigError(
             f"{where}: 'write_allocate' must be true or false, got {write_allocate!r}"
         )
+    prefetcher = spec.get("prefetcher", "none")
+    if not isinstance(prefetcher, str):
+        raise ConfigError(f"{where}: 'prefetcher' must be a string, got {prefetcher!r}")
+    prefetcher = prefetcher.lower()
+    if prefetcher not in PREFETCHER_NAMES:
+        raise ConfigError(
+            f"{where}: unknown prefetcher {prefetcher!r}; choose from {', '.join(PREFETCHER_NAMES)}"
+        )
     raw_bus_width = spec.get("bus_width")
     bus_width = (
         None if raw_bus_width is None else _require_int(where, "bus_width", raw_bus_width, 1)
@@ -276,6 +289,7 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
         write_policy=write_policy,
         write_allocate=write_allocate,
         bus_width=bus_width,
+        prefetcher=prefetcher,
     )
 
 

@@ -50,6 +50,7 @@ class LevelStats:
     write_allocate: bool
     bus_width: int | None
     transfer_cycles: int
+    prefetcher: str
     accesses: int
     hits: int
     misses: int
@@ -70,6 +71,13 @@ class LevelStats:
     write_bypasses: int
     bytes_read_from_below: int
     bytes_written_below: int
+    prefetches_issued: int
+    prefetch_hits: int
+    prefetch_evicted_unused: int
+    prefetch_probes: int
+    prefetch_probe_hits: int
+    prefetch_accuracy: float
+    prefetch_coverage: float
     three_c: ThreeCStats | None
 
 
@@ -83,6 +91,7 @@ class HierarchyStats:
     dram_reads: int
     dram_writes: int
     dram_demand_writes: int
+    dram_prefetch_reads: int
     dram_bytes_read: int
     dram_bytes_written: int
     memory_access_time: int
@@ -131,6 +140,7 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
                 write_allocate=level.write_allocate,
                 bus_width=level.bus_width,
                 transfer_cycles=level.transfer_cycles,
+                prefetcher=level.prefetcher_name,
                 accesses=c.accesses,
                 hits=c.hits,
                 misses=c.misses,
@@ -151,6 +161,13 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
                 write_bypasses=level.write_bypasses,
                 bytes_read_from_below=level.bytes_read_from_below,
                 bytes_written_below=level.bytes_written_below,
+                prefetches_issued=level.prefetches_issued,
+                prefetch_hits=level.prefetch_hits,
+                prefetch_evicted_unused=level.prefetch_evicted_unused,
+                prefetch_probes=level.prefetch_probes,
+                prefetch_probe_hits=level.prefetch_probe_hits,
+                prefetch_accuracy=level.prefetch_accuracy,
+                prefetch_coverage=level.prefetch_coverage,
                 three_c=three_c,
             )
         )
@@ -161,6 +178,7 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
         dram_reads=h.dram_reads,
         dram_writes=h.dram_writes,
         dram_demand_writes=h.dram_demand_writes,
+        dram_prefetch_reads=h.dram_prefetch_reads,
         dram_bytes_read=h.dram_bytes_read,
         dram_bytes_written=h.dram_bytes_written,
         memory_access_time=h.memory_access_time,

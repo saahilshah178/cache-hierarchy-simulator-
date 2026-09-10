@@ -123,6 +123,24 @@ Every level also counts the bytes it pulls in from below and pushes down,
 and the hierarchy counts DRAM bytes both ways, so a configuration can be
 judged on traffic as well as on latency.
 
+Prefetching
+-----------
+
+A level may name a ``prefetcher`` (see ``cachesim.prefetch``), which
+watches the demand references that reach it and may name one block to
+fetch ahead. The block is fetched through the levels below and installed
+here with a ``prefetched`` flag, so the first demand hit on it can be
+counted as a prefetch that paid off and one that leaves unused can be
+counted as pollution.
+
+Two accounting decisions, both of which the alternative would have
+undone: prefetch traffic is charged no time (it is assumed to overlap
+with useful work), and the lookups it causes at lower levels are counted
+as ``prefetch_probes`` rather than as accesses, so every level's miss
+rate stays a statement about demand references and the AMAT identity
+stays exact. Prefetch lookups also leave the replacement state of the
+levels below untouched.
+
 AMAT (average memory access time) is the headline metric:
 
     AMAT = L1_hit_time + L1_miss_rate * L1_miss_penalty
@@ -143,6 +161,7 @@ from typing import Any
 
 from cachesim.cache import Cache, Evicted
 from cachesim.config import ConfigError, HierarchySpec, parse_config
+from cachesim.prefetch import make_prefetcher
 from cachesim.stats import HierarchyStats, collect
 
 
@@ -164,6 +183,9 @@ class Level:
                      the level below into this one. None (the default)
                      models an infinitely wide link and adds no transfer
                      term, preserving the original timing model.
+    prefetcher     : name of the hardware prefetcher watching this level,
+                     "none" (default), "next-line" or "stride"; see
+                     ``cachesim.prefetch``.
     """
 
     def __init__(
@@ -174,6 +196,7 @@ class Level:
         write_policy: str = "write-back",
         write_allocate: bool = True,
         bus_width: int | None = None,
+        prefetcher: str = "none",
     ) -> None:
         if inclusion not in ("nine", "inclusive", "exclusive"):
             raise ValueError(f"{cache.name}: unknown inclusion policy {inclusion!r}")
@@ -183,6 +206,8 @@ class Level:
             raise ValueError(f"{cache.name}: bus_width must be positive, got {bus_width}")
         self.cache = cache
         self.hit_time = hit_time
+        self.prefetcher_name = prefetcher
+        self.prefetcher = make_prefetcher(prefetcher)
         self.bus_width = bus_width
         #: Cycles a whole block occupies the link from below, ceil(block/width).
         self.transfer_cycles = (
@@ -217,14 +242,55 @@ class Level:
         #: ``write_throughs`` and ``write_bypasses``.
         self.bytes_written_below = 0
 
+        #: Prefetches this level's prefetcher issued.
+        self.prefetches_issued = 0
+        #: Prefetched lines a demand reference then hit: useful prefetches.
+        self.prefetch_hits = 0
+        #: Prefetched lines that left this level without a demand hit.
+        self.prefetch_evicted_unused = 0
+        #: Lookups at this level caused by a prefetch from a level above.
+        self.prefetch_probes = 0
+        #: ... of which found the block here.
+        self.prefetch_probe_hits = 0
+
     def reset_stats(self) -> None:
-        """Zero this level's counters, including the cache's."""
+        """Zero this level's counters, including the cache's.
+
+        Prediction state is deliberately kept, exactly as cache contents
+        and replacement state are: a warm-up should leave the prefetcher
+        trained.
+        """
         self.back_invalidations = 0
         self.write_throughs = 0
         self.write_bypasses = 0
         self.bytes_read_from_below = 0
         self.bytes_written_below = 0
+        self.prefetches_issued = 0
+        self.prefetch_hits = 0
+        self.prefetch_evicted_unused = 0
+        self.prefetch_probes = 0
+        self.prefetch_probe_hits = 0
         self.cache.reset_stats()
+
+    @property
+    def prefetch_accuracy(self) -> float:
+        """Useful prefetches / prefetches issued; 0.0 if none were issued.
+
+        How much of the extra traffic was worth fetching.
+        """
+        if not self.prefetches_issued:
+            return 0.0
+        return self.prefetch_hits / self.prefetches_issued
+
+    @property
+    def prefetch_coverage(self) -> float:
+        """Useful prefetches / (useful prefetches + demand misses).
+
+        The share of the misses this level would otherwise have taken that
+        the prefetcher turned into hits.
+        """
+        total = self.prefetch_hits + self.cache.misses
+        return self.prefetch_hits / total if total else 0.0
 
 
 class Hierarchy:
@@ -253,6 +319,9 @@ class Hierarchy:
         # Precomputed so the access path can skip work no level asks for.
         self._has_exclusive = any(level.exclusive for level in levels)
         self._has_inclusive = any(level.inclusive for level in levels)
+        self._prefetch_levels = tuple(
+            i for i, level in enumerate(levels) if level.prefetcher is not None
+        )
 
         # --- statistics ---
         self.accesses = 0
@@ -261,6 +330,7 @@ class Hierarchy:
         self.dram_reads = 0  # demand fetches that missed every level
         self.dram_writes = 0  # blocks of modified data written out to DRAM
         self.dram_demand_writes = 0  # ... of which were stores no level allocated for
+        self.dram_prefetch_reads = 0  # prefetches that reached DRAM
         self.dram_bytes_read = 0
         self.dram_bytes_written = 0
         self.read_cycles = 0  # simulated cycles spent on loads
@@ -294,6 +364,7 @@ class Hierarchy:
                     write_policy=level.write_policy,
                     write_allocate=level.write_allocate,
                     bus_width=level.bus_width,
+                    prefetcher=level.prefetcher,
                 )
             )
         return cls(levels, spec.memory_access_time)
@@ -406,6 +477,9 @@ class Hierarchy:
             level.bytes_written_below += block_size
             self._write_back(forward_from, block)
 
+        if self._prefetch_levels:
+            self._run_prefetchers(block, hit_level)
+
         if is_write:
             self.writes += 1
             self.write_cycles += time
@@ -413,6 +487,78 @@ class Hierarchy:
             self.reads += 1
             self.read_cycles += time
         return time
+
+    # -- prefetching ----------------------------------------------------------
+
+    def _run_prefetchers(self, block: int, hit_level: int) -> None:
+        """Let every prefetcher the access reached observe it and predict.
+
+        A prefetcher at level i sees the reference only if the access got
+        that far, so an L1 prefetcher watches every reference while an L2
+        one watches only L1 misses. A prediction the level already holds is
+        dropped, and a prediction that is issued is fetched off the
+        critical path: no cycles are charged.
+        """
+        levels = self.levels
+        deepest = min(hit_level, len(levels) - 1)
+        for i in self._prefetch_levels:
+            if i > deepest:
+                break
+            level = levels[i]
+            prefetcher = level.prefetcher
+            assert prefetcher is not None  # _prefetch_levels only lists these
+            hit = i == hit_level
+            was_prefetched = hit and level.cache.clear_prefetched(block)
+            if was_prefetched:
+                level.prefetch_hits += 1
+            target = prefetcher.predict(block, hit, was_prefetched)
+            if target is None or target < 0 or level.cache.contains(target):
+                continue
+            level.prefetches_issued += 1
+            self._prefetch_fill(i, target)
+
+    def _prefetch_fill(self, level_index: int, block: int) -> None:
+        """Fetch ``block`` into ``levels[level_index]`` speculatively.
+
+        The lookup walks the levels below without touching their demand
+        counters or their replacement state: those probes are recorded as
+        ``prefetch_probes`` instead, so every level's miss rate remains a
+        statement about demand references alone. The block is then filled
+        into the same levels a demand fetch would have filled, and only the
+        issuing level marks its copy prefetched -- lines the prefetch
+        happened to leave behind at intermediate levels are ordinary fills.
+        Nothing here is charged simulated time.
+        """
+        levels = self.levels
+        nlevels = len(levels)
+        block_size = self.block_size
+        source = nlevels
+        for k in range(level_index + 1, nlevels):
+            below = levels[k]
+            below.prefetch_probes += 1
+            if below.cache.contains(block):
+                below.prefetch_probe_hits += 1
+                source = k
+                break
+        dirty = False
+        if source == nlevels:
+            self.dram_prefetch_reads += 1
+            self.dram_bytes_read += block_size
+        elif levels[source].exclusive:
+            # As on the demand path, an exclusive level hands the block up.
+            removed = levels[source].cache.invalidate(block, count_writeback=False)
+            if removed is not None:
+                dirty = removed.dirty
+        for k in range(source - 1, level_index - 1, -1):
+            level = levels[k]
+            if level.exclusive and k != level_index:
+                continue
+            level.bytes_read_from_below += block_size
+            evicted = level.cache.allocate(
+                block, dirty=dirty and k == level_index, prefetched=k == level_index
+            )
+            if evicted is not None:
+                self._handle_eviction(k, evicted)
 
     def _handle_eviction(self, level_index: int, evicted: Evicted) -> None:
         """React to a line leaving ``levels[level_index]``.
@@ -429,6 +575,8 @@ class Hierarchy:
         every level above it, which may send a further, more recent copy of
         the data down past this level.
         """
+        if evicted.prefetched:
+            self.levels[level_index].prefetch_evicted_unused += 1
         below = level_index + 1
         if self._has_exclusive and below < len(self.levels) and self.levels[below].exclusive:
             level = self.levels[below]
@@ -468,6 +616,8 @@ class Hierarchy:
             if removed is None:
                 continue
             level.back_invalidations += 1
+            if removed.prefetched:
+                level.prefetch_evicted_unused += 1
             if removed.dirty:
                 level.bytes_written_below += self.block_size
                 self._write_back(level_index + 1, block)
@@ -589,6 +739,7 @@ class Hierarchy:
         """
         self.accesses = self.reads = self.writes = 0
         self.dram_reads = self.dram_writes = self.dram_demand_writes = 0
+        self.dram_prefetch_reads = 0
         self.dram_bytes_read = self.dram_bytes_written = 0
         self.read_cycles = self.write_cycles = 0
         for level in self.levels:

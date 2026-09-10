@@ -74,10 +74,16 @@ EMPTY = -1
 
 
 class Evicted(NamedTuple):
-    """A line removed from a cache by ``allocate`` or ``invalidate``."""
+    """A line removed from a cache by ``allocate`` or ``invalidate``.
+
+    ``prefetched`` marks a line that a prefetcher brought in and that no
+    demand reference ever hit: such a line was fetched for nothing and,
+    worse, displaced something else.
+    """
 
     block: int
     dirty: bool
+    prefetched: bool = False
 
 
 def _validate_geometry(name: str, size: int, block_size: int, associativity: int) -> None:
@@ -182,9 +188,11 @@ class Cache:
         )
 
         # Cache contents, indexed [set][way]: the block number held in each
-        # way (EMPTY for an invalid way) and its dirty bit.
+        # way (EMPTY for an invalid way), its dirty bit, and whether a
+        # prefetcher installed it and no demand reference has hit it yet.
         self._blocks = [[EMPTY] * associativity for _ in range(self.num_sets)]
         self._dirty = [[False] * associativity for _ in range(self.num_sets)]
+        self._prefetched = [[False] * associativity for _ in range(self.num_sets)]
 
         # --- statistics -----------------------------------------------------
         self.hits = 0
@@ -272,17 +280,22 @@ class Cache:
             self._update_shadow(block)
         return False
 
-    def allocate(self, block: int, dirty: bool = False) -> Evicted | None:
+    def allocate(self, block: int, dirty: bool = False, prefetched: bool = False) -> Evicted | None:
         """Install ``block``, evicting a victim if its set is full.
 
         Returns the evicted line, or None if an empty way was used. If the
         block is already present this is a no-op (the dirty bit is OR-ed in)
         and None is returned.
+
+        ``prefetched`` marks the line as speculatively fetched; the flag is
+        cleared by ``clear_prefetched`` on the first demand hit, and travels
+        with the line into the ``Evicted`` record if it leaves unused.
         """
         index = self._index_fn
         set_idx = block % self.num_sets if index is None else index(block)
         blocks = self._blocks[set_idx]
         dirty_bits = self._dirty[set_idx]
+        prefetched_bits = self._prefetched[set_idx]
 
         way = EMPTY
         for w in range(self.associativity):
@@ -297,12 +310,13 @@ class Cache:
         if way == EMPTY:
             way = self.policy.victim(set_idx)
             self.evictions += 1
-            evicted = Evicted(blocks[way], dirty_bits[way])
+            evicted = Evicted(blocks[way], dirty_bits[way], prefetched_bits[way])
             if evicted.dirty:
                 self.writebacks += 1
 
         blocks[way] = block
         dirty_bits[way] = dirty
+        prefetched_bits[way] = prefetched
         self.fills += 1
         self.policy.on_fill(set_idx, way, block)
         return evicted
@@ -322,9 +336,10 @@ class Cache:
         blocks = self._blocks[set_idx]
         for way in range(self.associativity):
             if blocks[way] == block:
-                removed = Evicted(block, self._dirty[set_idx][way])
+                removed = Evicted(block, self._dirty[set_idx][way], self._prefetched[set_idx][way])
                 blocks[way] = EMPTY
                 self._dirty[set_idx][way] = False
+                self._prefetched[set_idx][way] = False
                 self.invalidations += 1
                 if removed.dirty and count_writeback:
                     self.writebacks += 1
@@ -353,6 +368,32 @@ class Cache:
             if blocks[way] == block:
                 self._dirty[set_idx][way] = True
                 return True
+        return False
+
+    def is_prefetched(self, block: int) -> bool:
+        """True if ``block`` is resident and no demand reference has hit it
+        since a prefetcher installed it."""
+        set_idx = block % self.num_sets
+        blocks = self._blocks[set_idx]
+        for way in range(self.associativity):
+            if blocks[way] == block:
+                return self._prefetched[set_idx][way]
+        return False
+
+    def clear_prefetched(self, block: int) -> bool:
+        """Clear ``block``'s prefetched flag; returns whether it was set.
+
+        A True return is a prefetch that paid off: this is the first demand
+        reference to reach a line the prefetcher fetched.
+        """
+        set_idx = block % self.num_sets
+        blocks = self._blocks[set_idx]
+        prefetched_bits = self._prefetched[set_idx]
+        for way in range(self.associativity):
+            if blocks[way] == block:
+                was_set = prefetched_bits[way]
+                prefetched_bits[way] = False
+                return was_set
         return False
 
     def clean(self, block: int) -> bool:
