@@ -209,7 +209,7 @@ def stencil_2d(n: int = 96, passes: int = 2, base: int = 0x0600_0000) -> Iterato
     2 misses per 8 interior points, or 1 miss per 24 accesses; the
     compulsory floor is the blocks of the two arrays, ceil(n*n/8) for
     ``in`` plus those spanning the interior of ``out`` (2280 at n=96)
-    (R. Rivera and C.-W. Tseng, "Tiling Optimizations for 3D Scientific
+    (G. Rivera and C.-W. Tseng, "Tiling Optimizations for 3D Scientific
     Computations", SC 2000).
     """
     grid_bytes = n * n * WORD
