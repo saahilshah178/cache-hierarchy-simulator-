@@ -20,6 +20,7 @@ cachesim [-h] [--version] <command> ...
     compare      run one trace through several configs and tabulate the differences
     sets         per-set diagnostics: hot sets and windowed set pressure
     gen-traces   write synthetic workload traces
+    bench        time the simulator itself on a trace: accesses per second
 ```
 
 `--version` prints `cachesim 0.9.0`. A missing subcommand, an unknown subcommand or an
@@ -447,7 +448,7 @@ trace, and how crowded the sets are at any one time.
 
 ```text
 cachesim sets [-h] [--size SIZE] [--block-size BLOCK_SIZE] [--assoc ASSOC]
-              [--policy {brrip,drrip,fifo,lfu,lru,mru,nru,opt,plru,random,srrip}]
+              [--policy {brrip,drrip,fifo,lfu,lru,mru,nru,plru,random,srrip}]
               [--window W] [--top N] [--format {text,json}]
               trace
 ```
@@ -458,7 +459,7 @@ cachesim sets [-h] [--size SIZE] [--block-size BLOCK_SIZE] [--assoc ASSOC]
 | `--size SIZE` | `32k` | Cache size; accepts a `k`/`M` suffix. |
 | `--block-size BLOCK_SIZE` | `64` | Block size in bytes. |
 | `--assoc ASSOC` | `4` | Ways per set. |
-| `--policy` | `lru` | Replacement policy for the cumulative half of the report. |
+| `--policy` | `lru` | Replacement policy for the cumulative half of the report. The offline optimum is not offered here because it needs a reference stream in advance; use [`policies`](#policies). |
 | `--window W` | `512` | Accesses per pressure window. |
 | `--top N` | `8` | List the N busiest sets; `0` omits the list. |
 | `--format` | `text` | `text` or `json`. |
@@ -502,11 +503,12 @@ windowed set pressure (windows of 512 accesses)
 `oversubscribed_fraction`, `windows_oversubscribed`, `windows_oversubscribed_fraction`,
 `mean_distinct`, `max_distinct`).
 
-A missing trace, an empty trace and a geometry that is not a whole number of sets are
-usage errors and exit 2. `--policy opt` is accepted by the parser but cannot be run
-here: the offline policy needs the level's whole reference stream in advance, and the
-command fails with `RuntimeError: policy 'opt' is offline and has not been given the
-future`, exiting 1. Use [`policies`](#policies) for the offline optimum.
+A missing trace, an empty trace, a geometry that is not a whole number of sets, and
+`--policy opt` are all usage errors and exit 2: the offline policy needs the level's
+whole reference stream in advance, so `opt` is not among the choices `--policy`
+accepts here (`cachesim sets: error: argument --policy: invalid choice: 'opt' (choose
+from brrip, drrip, fifo, lfu, lru, mru, nru, plru, random, srrip)`). Use
+[`policies`](#policies) for the offline optimum.
 
 ## gen-traces
 
@@ -543,26 +545,54 @@ with the behaviour each is built to demonstrate. See
 
 ## bench
 
-Times the simulator itself on one trace and reports throughput. This section describes
-the interface; run `cachesim bench --help` for the flag defaults as shipped.
+Times the simulator itself on one trace and reports throughput.
 
 ```text
-cachesim bench [-h] [--config FILE] [--repeat N] [--format {text,json}] trace
+cachesim bench [-h] [--config FILE] [--repeat N]
+               [--trace-format {auto,native,dinero,lackey}]
+               [--format {text,json}]
+               trace
 ```
 
-| Flag | Meaning |
-|------|---------|
-| `trace` | Trace file to replay. |
-| `--config FILE` | JSON hierarchy configuration to time; the built-in hierarchy is used when omitted. |
-| `--repeat N` | Number of timed repetitions to run. |
-| `--format` | `text` for the summary, `json` for the same figures as an object. |
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `trace` | required | Trace file to replay. |
+| `--config FILE` | built-in L1/L2/L3 hierarchy | JSON hierarchy configuration to time. |
+| `--repeat N` | `3` | Timed repetitions to run, each through a fresh hierarchy; the best is the headline figure. |
+| `--trace-format` | `auto` | Format of the input trace, chosen by extension by default. |
+| `--format` | `text` | `text` for the summary, `json` for the same figures as an object. |
 
 It reports the best and median wall-clock time over the repetitions and the resulting
 accesses per second. These are properties of the machine the command runs on and of
 the Python interpreter in use, not of the simulated hierarchy: they say how fast the
 simulator processes a trace, and no simulated cycle count, miss rate or AMAT depends on
-them. Comparisons are only meaningful between runs on the same machine, and the best
-time is the more stable of the two figures.
+them. Comparisons are only meaningful between runs on the same machine.
+
+```bash
+cachesim bench traces/conflict.trace
+```
+
+```text
+BENCHMARK  (traces/conflict.trace)
+  config          : built-in default
+  accesses        :       65,536
+  repetitions     :            3
+  parse           :        0.018 s   (once, not in the times below)
+  best            :        0.051 s
+  median          :        0.052 s
+  throughput      :    1,279,394 accesses/s   (782 ns/access, best)
+```
+
+The timings above are from the development machine and will differ on another one or
+between runs on the same one; rerun the command shown to get figures for yours.
+
+`--format json` prints the same run as one object: `trace` and `config` (the paths as
+given, `config` `null` for the built-in hierarchy), `accesses`, `repeat`,
+`parse_seconds`, `best_seconds`, `median_seconds`, `accesses_per_second` (`accesses /
+best_seconds`), and `seconds`, every repetition's wall-clock time in order.
+
+A `--repeat` below 1 and an unreadable, malformed or empty trace print `error: ...` and
+exit 1; an invalid `--config` fails the same way as [`run`](#run).
 
 ## JSON output
 

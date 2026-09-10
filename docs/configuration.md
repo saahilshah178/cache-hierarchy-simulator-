@@ -2,10 +2,10 @@
 
 A hierarchy is described by a single JSON object: a list of cache levels, outermost
 level first, and a model of main memory. The object is passed to `cachesim run
---config FILE` and `cachesim compare --config FILE`, or to `Hierarchy.from_config` in
-library code. The analysis subcommands (`sweep`, `policies`, `mrc`, `sets`) build a
-single level from flags instead and take no configuration file; see
-[docs/cli.md](cli.md).
+--config FILE`, `cachesim compare --config FILE` and `cachesim bench --config FILE`,
+or to `Hierarchy.from_config` in library code. The analysis subcommands (`sweep`,
+`policies`, `mrc`, `sets`) build a single level from flags instead and take no
+configuration file; see [docs/cli.md](cli.md).
 
 ```json
 {
@@ -87,12 +87,30 @@ and so on, with the level's `name` appended when it is present.
 
 `policy: "opt"` names Belady's MIN, an offline policy that has to be told the future.
 At most one level may ask for it, because the reference stream a second such level
-would see depends on what the first one evicts and cannot be recorded in advance. A
-configuration naming `opt` parses, but `cachesim run` does not supply the reference
-stream and the first access fails with `RuntimeError: policy 'opt' is offline and has
-not been given the future`. Drive it with `cachesim.opt.simulate_with_opt`, or use
-[`cachesim policies`](cli.md#policies), which reports OPT alongside every online
-policy.
+would see depends on what the first one evicts and cannot be recorded in advance;
+`parse_config` rejects a second `opt` level itself (see the cross-level rules below).
+`cachesim run` and `cachesim compare` both detect an `opt` level and drive it
+automatically with the two-pass method in `cachesim.opt.simulate_with_opt` -- see
+`run_trace` in `cachesim/__init__.py` and `simulate` in `cachesim/compare.py` -- so
+neither command needs an extra flag to produce a valid OPT run.
+
+What `simulate_with_opt` does still restrict is inclusion: the `opt` level must leave
+`inclusion` at its default `"nine"`, and no level below it may be `"inclusive"`,
+because either would let a replacement decision change what the OPT level is asked
+for between the recording pass and the OPT pass. `parse_config` accepts such a
+configuration -- inclusion is unrelated to schema validity -- and the check happens
+only once `cachesim run` or `cachesim compare` drives the trace through it, still
+raising `ConfigError`: an `opt` level named `L1` above an `L2` whose `inclusion` is
+`"inclusive"` fails with `error: invalid config: L1: policy 'opt' cannot sit above an
+inclusive level (L2); back-invalidations from below would change the reference stream
+between the recording pass and the OPT pass`.
+
+Driving `OPTPolicy` directly, without going through `simulate_with_opt` -- building a
+`Hierarchy` from a config that names `opt` and probing it before calling
+`preload(blocks)` on that level's policy -- still fails immediately with
+`RuntimeError: policy 'opt' is offline and has not been given the future`. Use
+[`cachesim policies`](cli.md#policies) for the offline optimum without writing a
+hierarchy config at all.
 
 `victim_cache` accepts both `4` and `{"entries": 4}`; the object form exists so the
 buffer can grow further keys later without changing the shorthand's meaning.
