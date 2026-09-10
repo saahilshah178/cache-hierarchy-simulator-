@@ -12,8 +12,8 @@ dist/
 .coverage
 
 # Generated data
-traces/*.trace
-traces/*.trace.gz
+traces/*
+!traces/.gitkeep
 plots/
 
 # OS
