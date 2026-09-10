@@ -123,12 +123,23 @@ def _parse_native(path: str) -> Iterator[tuple[int, bool]]:
             if len(parts) != 2:
                 raise ValueError(f"{path}:{lineno}: expected 'ADDR R|W', got {line!r}")
             addr_str, op = parts
-            if not _HEX.fullmatch(addr_str):
+            # int() also accepts signs, underscores, surrounding whitespace and
+            # non-ASCII digits, none of which the format allows; a regex is
+            # the precise check but costs as much as simulating the access,
+            # so it runs only for the strings the fast checks let through.
+            try:
+                addr = int(addr_str, 16)
+            except ValueError:
+                addr = -1
+            if addr < 0 or not addr_str.isascii() or not _HEX.fullmatch(addr_str):
                 raise ValueError(f"{path}:{lineno}: bad hex address {addr_str!r}")
-            op = op.upper()
-            if op not in ("R", "W"):
+            if op == "R" or op == "W":
+                is_write = op == "W"
+            elif op.upper() in ("R", "W"):
+                is_write = op.upper() == "W"
+            else:
                 raise ValueError(f"{path}:{lineno}: op must be R or W, got {op!r}")
-            yield int(addr_str, 16), op == "W"
+            yield addr, is_write
 
 
 def _parse_dinero(path: str) -> Iterator[tuple[int, bool]]:
