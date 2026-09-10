@@ -22,16 +22,16 @@ cachesim gen-traces --out-dir traces
 
 | Layer | Establishes | Module | Tests | Subtests | Time |
 | --- | --- | --- | ---: | ---: | ---: |
-| [Reference model](#reference-model) | the oracle is itself correct | `tests/test_reference.py` | 28 | - | 0.08 s |
-| [Differential](#differential-testing) | two implementations agree access by access | `tests/test_differential.py` | 10 | 163 | 1.24 s |
-| [Property-based](#property-based-tests) | identities hold for arbitrary inputs | `tests/test_properties.py` | 16 | - | 1.58 s |
-| [Invariants](#invariants-and---check) | a finished run is self-consistent | `tests/test_invariants.py` | 35 | 6 | 0.57 s |
-| [Textbook](#textbook-known-answers) | published examples reproduce | `tests/test_textbook.py` | 8 | - | 0.12 s |
-| [Policy traces](#policy-hand-traces) | each policy makes the documented choice | `tests/test_policies.py` | 29 | 20 | 0.17 s |
-| [Closed form](#closed-form-derivations) | every reported number is derivable | `tests/test_closed_form.py` | 26 | 14 | 0.36 s |
-| [Block size](#the-block-size-closed-form) | the transfer term is exact | `tests/test_timing.py` | 22 | 13 | 2.74 s |
-| [Golden](#golden-regressions) | results do not drift | `tests/test_golden.py` | 4 | 18 | 2.59 s |
-| [Stack distance](#stack-distance-cross-check) | profiler and simulator agree exactly | `tests/test_stackdist.py` | 39 | 34 | 1.55 s |
+| [Reference model](#reference-model) | the oracle is itself correct | `tests/test_reference.py` | 28 | - | 0.13 s |
+| [Differential](#differential-testing) | two implementations agree access by access | `tests/test_differential.py` | 10 | 163 | 1.30 s |
+| [Property-based](#property-based-tests) | identities hold for arbitrary inputs | `tests/test_properties.py` | 16 | - | 1.76 s |
+| [Invariants](#invariants-and---check) | a finished run is self-consistent | `tests/test_invariants.py` | 36 | 6 | 0.53 s |
+| [Textbook](#textbook-known-answers) | published examples reproduce | `tests/test_textbook.py` | 8 | - | 0.11 s |
+| [Policy traces](#policy-hand-traces) | each policy makes the documented choice | `tests/test_policies.py` | 34 | 23 | 0.17 s |
+| [Closed form](#closed-form-derivations) | every reported number is derivable | `tests/test_closed_form.py` | 26 | 14 | 0.27 s |
+| [Block size](#the-block-size-closed-form) | the transfer term is exact | `tests/test_timing.py` | 22 | 13 | 2.37 s |
+| [Golden](#golden-regressions) | results do not drift | `tests/test_golden.py` | 4 | 18 | 1.89 s |
+| [Stack distance](#stack-distance-cross-check) | profiler and simulator agree exactly | `tests/test_stackdist.py` | 39 | 34 | 1.18 s |
 
 ```bash
 python -m pytest tests/test_reference.py
@@ -66,8 +66,8 @@ The two implementations differ in every data structure that could hide a shared 
 
 The reference is correspondingly slower, which is one reason it is confined to the test
 suite. On 50,000 mixed read/write references through a three-level hierarchy
-(2 KB / 4-way, 16 KB / 8-way, 64 KB / 16-way) the reference takes 0.757 s against the real
-model's 0.263 s, a factor of 2.9, and the gap widens as the shadow cache grows:
+(2 KB / 4-way, 16 KB / 8-way, 64 KB / 16-way) the reference takes 0.752 s against the real
+model's 0.191 s, a factor of 3.9, and the gap widens as the shadow cache grows:
 
 ```python
 import random, time
@@ -97,8 +97,8 @@ for name, factory in (("real", Hierarchy.from_spec), ("reference", RefHierarchy.
 ```
 
 ```text
-real         0.263 s
-reference    0.757 s
+real         0.191 s
+reference    0.752 s
 ```
 
 The random replacement policy is the one place where agreement requires more than
@@ -364,10 +364,12 @@ transfer time (block size over bus width) or a non-constant DRAM model adds term
 does not have.
 
 **Structure, always checked.** A block has at most one copy in a cache; a level holds no
-more lines than it has blocks; every line sits in the set its block maps to; every valid
-line is found by `contains()`; `is_dirty()` agrees with the line's dirty bit. Lines parked
-in a victim buffer are reported with set index `-1` and are exempt from the set-placement
-check.
+more lines than it has blocks, plus the entries of its victim buffer when one is
+configured; every line sits in the set its block maps to; every valid line is found by
+`contains()`; `is_dirty()` agrees with the line's dirty bit. Lines parked in a victim
+buffer are reported with set index `-1` and are exempt from the set-placement check, but
+still count toward the raised residency bound
+(`tests/test_invariants.py::TestVictimBuffer::test_a_victim_buffer_raises_the_residency_bound`).
 
 **Dirty lines after a flush, only with `after_flush=True`.** No level holds a dirty line.
 This cannot be checked unconditionally: a hierarchy that has merely run a trace is
@@ -441,12 +443,42 @@ invariants: skipped timing identities (memory model is not a constant latency; L
 invariants: 60 checks passed
 ```
 
+A victim buffer raises how many lines a level may legitimately hold, and the residency
+check counts the buffer's entries alongside the array's blocks, so a victim-cache
+configuration passes too; the demand-traffic and timing groups step aside for the same
+reason the guard table above gives:
+
+```bash
+cachesim run --check --config configs/victim_cache.json traces/sequential.trace > /dev/null
+```
+
+```text
+invariants: skipped write-back conservation (L1: victim cache is enabled)
+invariants: skipped traffic-flow identities (L1: victim cache is enabled)
+invariants: skipped timing identities (L1: victim cache is enabled)
+invariants: 50 checks passed
+```
+
 The clean exit, the JSON output staying parseable with diagnostics on stderr, the absence
 of any invariant output without the flag, and the non-zero exit with the violations listed
 are covered by `tests/test_invariants.py::TestRunCheckFlag`
 (`test_check_passes_on_a_normal_run`, `test_check_keeps_json_output_parseable`,
 `test_without_the_flag_nothing_is_checked`,
-`test_a_violation_exits_non_zero_and_lists_it`).
+`test_a_violation_exits_non_zero_and_lists_it`), all by calling `main()` directly.
+`python -m cachesim` exits the same way through a separate path: `cachesim/__main__.py`
+wraps that same call in `sys.exit()`, exactly as the installed console script does, which
+`tests/test_cli.py::TestCLI::test_python_dash_m_propagates_the_exit_code` pins by running
+both entry points as subprocesses:
+
+```bash
+python -m cachesim run traces/does-not-exist.trace
+```
+
+```text
+error: [Errno 2] No such file or directory: 'traces/does-not-exist.trace'
+```
+
+exits 1, the same as the console script.
 
 ### Checking that the checker checks
 
@@ -884,7 +916,7 @@ python -m pytest --co -q -o addopts="" | tail -1
 ```
 
 ```text
-627 tests collected in 0.15s
+666 tests collected in 0.22s
 ```
 
 The whole suite:
@@ -894,18 +926,18 @@ python -m pytest
 ```
 
 ```text
-627 passed, 509 subtests passed in 20.25s
+666 passed, 635 subtests passed in 14.82s
 ```
 
 The golden module regenerates the sample traces into a temporary directory, which is the
-single largest fixed cost. Skipping it saves about 2.7 s:
+single largest fixed cost. Skipping it saves about 1.9 s:
 
 ```bash
 CACHESIM_SKIP_SLOW=1 python -m pytest
 ```
 
 ```text
-623 passed, 4 skipped, 491 subtests passed in 17.57s
+662 passed, 4 skipped, 617 subtests passed in 12.91s
 ```
 
 The slowest individual tests are the ones that regenerate traces or sweep a sample
@@ -918,14 +950,14 @@ python -m pytest --durations=8
 
 | Duration | Test |
 | ---: | --- |
-| 2.16 s | `tests/test_golden.py::TestGolden::test_simulation_results_are_unchanged` |
-| 1.96 s | `tests/test_workloads.py::TestHashProbe::test_seeded_miss_count_is_exact` |
-| 1.89 s | `tests/test_workloads.py::TestHashProbe::test_steady_state_miss_rate_matches_one_minus_c_over_n` |
-| 1.25 s | `tests/test_timing.py::TestSampleTraceBlockSizeTable::test_the_matmul_naive_column_bottoms_out_at_256_bytes` |
-| 0.63 s | `tests/test_stackdist.py::TestPerSetProfile::test_all_associativities_match_simulation` |
-| 0.60 s | `tests/test_indexing.py::TestIndexingOnWorkloads::test_xor_indexing_removes_most_matmul_conflict_misses` |
-| 0.46 s | `tests/test_stackdist.py::TestMissRatioCurveMatchesSimulation::test_every_sample_workload` |
+| 1.50 s | `tests/test_golden.py::TestGolden::test_simulation_results_are_unchanged` |
+| 1.08 s | `tests/test_timing.py::TestSampleTraceBlockSizeTable::test_the_matmul_naive_column_bottoms_out_at_256_bytes` |
+| 0.47 s | `tests/test_indexing.py::TestIndexingOnWorkloads::test_xor_indexing_removes_most_matmul_conflict_misses` |
+| 0.45 s | `tests/test_stackdist.py::TestPerSetProfile::test_all_associativities_match_simulation` |
+| 0.44 s | `tests/test_workloads.py::TestHashProbe::test_steady_state_miss_rate_matches_one_minus_c_over_n` |
 | 0.44 s | `tests/test_golden.py::TestGolden` class setup (regenerating the traces) |
+| 0.43 s | `tests/test_workloads.py::TestHashProbe::test_seeded_miss_count_is_exact` |
+| 0.37 s | `tests/test_hierarchy.py::TestVictimCache::test_conflict_streams_reach_the_compulsory_floor` |
 
 ### Continuous integration
 
