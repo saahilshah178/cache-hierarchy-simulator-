@@ -17,7 +17,7 @@ from cachesim.opt import (
     run_opt,
     simulate_with_opt,
 )
-from cachesim.workloads import SAMPLE_TRACES
+from cachesim.workloads import SAMPLE_NAMES, get_workload
 
 # Silberschatz, Galvin and Gagne, "Operating System Concepts", 10th ed.,
 # 2018, sec. 10.4: the reference string used for every page-replacement
@@ -71,7 +71,7 @@ def misses_of(policy: str, blocks: Sequence[int], capacity: int) -> int:
 
 def sample_accesses(name: str, limit: int) -> list[tuple[int, bool]]:
     """The first ``limit`` accesses of a sample workload as (addr, is_write)."""
-    pairs: Iterable[tuple[int, str]] = SAMPLE_TRACES[name]()
+    pairs: Iterable[tuple[int, str]] = get_workload(name).generator()
     return [(addr, op == "W") for addr, op in islice(pairs, limit)]
 
 
@@ -156,7 +156,7 @@ class TestOptPolicy(unittest.TestCase):
         # Small single level (4 KB, 4-way, 64 B blocks) so the policies have
         # something to decide; the traces are truncated to keep the suite
         # quick, which does not weaken the ordering.
-        for name in SAMPLE_TRACES:
+        for name in SAMPLE_NAMES:
             with self.subTest(workload=name):
                 accesses = sample_accesses(name, 30_000)
                 counts = {}
