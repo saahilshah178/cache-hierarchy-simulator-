@@ -326,5 +326,35 @@ class TestRunCheckFlag(unittest.TestCase):
         self.assertIn("total_cycles !=", err)
 
 
+class TestPublicAPI(unittest.TestCase):
+    """The checker is part of the package's public surface.
+
+    Every other library-level module (cache, config, hierarchy, policies,
+    report, stats, trace) is reachable as ``from cachesim import X``, so
+    the checker is too. ``cachesim.reference`` deliberately stays out: it
+    is a test oracle, not an API.
+    """
+
+    def test_the_checker_is_reachable_from_the_top_level_package(self) -> None:
+        import cachesim
+        import cachesim.invariants as module
+
+        self.assertIs(cachesim.check_invariants, module.check_invariants)
+        self.assertIs(cachesim.check_hierarchy, module.check_hierarchy)
+        self.assertIs(cachesim.CheckReport, module.CheckReport)
+
+    def test_the_checker_is_listed_in_dunder_all(self) -> None:
+        import cachesim
+
+        for name in ("CheckReport", "check_hierarchy", "check_invariants"):
+            self.assertIn(name, cachesim.__all__)
+
+    def test_every_exported_name_exists(self) -> None:
+        import cachesim
+
+        for name in cachesim.__all__:
+            self.assertTrue(hasattr(cachesim, name), name)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -13,6 +13,7 @@ from cachesim.config import (
     parse_config,
 )
 from cachesim.hierarchy import Hierarchy, Level
+from cachesim.invariants import CheckReport, check_hierarchy, check_invariants
 from cachesim.policies import POLICIES, ReplacementPolicy
 from cachesim.report import build_report, format_report, print_report
 from cachesim.stats import HierarchyStats, LevelStats, ThreeCStats
@@ -25,6 +26,7 @@ __all__ = [
     "POLICIES",
     "Cache",
     "CacheSpec",
+    "CheckReport",
     "ConfigError",
     "Hierarchy",
     "HierarchySpec",
@@ -35,6 +37,8 @@ __all__ = [
     "ThreeCStats",
     "__version__",
     "build_report",
+    "check_hierarchy",
+    "check_invariants",
     "default_config",
     "format_report",
     "load_config",
