@@ -65,8 +65,8 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from cachesim.cliargs import positive_int, read_trace
 from cachesim.plot import MatplotlibUnavailable, format_bytes, plot_mrc
-from cachesim.trace import parse_trace
 
 #: Stack distance reported for the first reference to a block. Real
 #: distances are >= 0, so any negative sentinel is unambiguous.
@@ -437,24 +437,15 @@ def power_of_two_capacities(limit: int) -> list[int]:
 # -- the `mrc` command ---------------------------------------------------------
 
 
-def _positive_int(text: str) -> int:
-    value = int(text)
-    if value <= 0:
-        raise argparse.ArgumentTypeError(f"must be a positive integer, got {text}")
-    return value
-
-
 def _load_blocks(parser: argparse.ArgumentParser, path: str, block_size: int) -> list[int]:
-    """Read a trace into a block stream, turning problems into CLI errors."""
-    try:
-        blocks = block_stream(parse_trace(path), block_size)
-    except FileNotFoundError:
-        parser.error(f"trace not found: {path} (run `cachesim gen-traces` to create the samples)")
-    except (OSError, ValueError) as exc:
-        parser.error(str(exc))
-    if not blocks:
-        parser.error(f"no accesses in {path}")
-    return blocks
+    """Read a trace straight into a block stream, without the addresses.
+
+    ``block_stream`` is handed the parse iterator rather than a list, so
+    the addresses are converted to block numbers as they are read and only
+    the block stream is ever resident: on matmul_naive.trace that is one
+    list of 532,480 ints instead of that plus 532,480 pairs.
+    """
+    return read_trace(parser, path, lambda accesses: block_stream(accesses, block_size))
 
 
 @dataclass(frozen=True)
@@ -596,18 +587,18 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Add the ``mrc`` options to ``parser``."""
     parser.add_argument("trace", help="trace file (one 'ADDR R|W' per line)")
     parser.add_argument(
-        "--block-size", type=_positive_int, default=64, help="block size in bytes (default 64)"
+        "--block-size", type=positive_int, default=64, help="block size in bytes (default 64)"
     )
     parser.add_argument(
         "--sets",
-        type=_positive_int,
+        type=positive_int,
         default=None,
         metavar="N",
         help="also profile a cache with N sets, giving misses for every associativity",
     )
     parser.add_argument(
         "--max-capacity",
-        type=_positive_int,
+        type=positive_int,
         default=None,
         metavar="BLOCKS",
         help="largest capacity to tabulate, in blocks "

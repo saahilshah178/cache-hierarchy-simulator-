@@ -41,10 +41,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from cachesim.cliargs import load_trace, non_negative_int
 from cachesim.config import ConfigError, default_config, load_config
 from cachesim.hierarchy import Hierarchy
 from cachesim.stats import HierarchyStats
-from cachesim.trace import parse_trace
 
 #: ``--config default`` means the built-in hierarchy rather than a file.
 DEFAULT_CONFIG_NAME = "default"
@@ -165,13 +165,6 @@ def format_table(results: Sequence[Comparison]) -> str:
 # -- CLI -----------------------------------------------------------------------
 
 
-def _non_negative_int(text: str) -> int:
-    value = int(text)
-    if value < 0:
-        raise argparse.ArgumentTypeError(f"must be a non-negative integer, got {text}")
-    return value
-
-
 def _label_for(path: str) -> str:
     if path == DEFAULT_CONFIG_NAME:
         return DEFAULT_CONFIG_NAME
@@ -210,7 +203,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--warmup",
-        type=_non_negative_int,
+        type=non_negative_int,
         default=0,
         metavar="N",
         help="simulate the first N accesses, then reset all statistics before "
@@ -235,16 +228,7 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     except (OSError, json.JSONDecodeError, ConfigError) as exc:
         parser.error(f"cannot load config: {exc}")
 
-    try:
-        accesses = list(parse_trace(args.trace))
-    except FileNotFoundError:
-        parser.error(
-            f"trace not found: {args.trace} (run `cachesim gen-traces` to create the samples)"
-        )
-    except (OSError, ValueError) as exc:
-        parser.error(str(exc))
-    if not accesses:
-        parser.error(f"no accesses in {args.trace}")
+    accesses = load_trace(parser, args.trace)
     if args.warmup >= len(accesses):
         parser.error(
             f"--warmup {args.warmup} leaves nothing to measure "

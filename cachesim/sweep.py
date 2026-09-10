@@ -58,6 +58,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from cachesim.cache import Cache
+from cachesim.cliargs import load_trace, non_negative_int, parse_size, positive_int
 from cachesim.config import CacheSpec
 from cachesim.hierarchy import Hierarchy, Level
 from cachesim.plot import (
@@ -68,7 +69,6 @@ from cachesim.plot import (
     plot_sweep,
 )
 from cachesim.policies import POLICIES
-from cachesim.trace import parse_trace
 
 #: The parameters ``sweep`` knows how to vary.
 PARAMS = ("size", "associativity", "block_size", "policy")
@@ -455,41 +455,6 @@ def print_grid(grid: SweepGrid) -> None:
 # -- CLI -----------------------------------------------------------------------
 
 
-def _positive_int(text: str) -> int:
-    value = int(text)
-    if value <= 0:
-        raise argparse.ArgumentTypeError(f"must be a positive integer, got {text}")
-    return value
-
-
-def _non_negative_int(text: str) -> int:
-    value = int(text)
-    if value < 0:
-        raise argparse.ArgumentTypeError(f"must be a non-negative integer, got {text}")
-    return value
-
-
-def parse_size(text: str) -> int:
-    """``'4k'`` -> 4096, ``'2M'`` -> 2097152, ``'512'`` -> 512.
-
-    A bare number is bytes; a ``k``/``K`` or ``m``/``M`` suffix (with an
-    optional trailing ``b``/``B``) multiplies by 1024 or 1024*1024.
-    """
-    cleaned = text.strip().lower().removesuffix("b")
-    scale = 1
-    if cleaned.endswith("k"):
-        scale, cleaned = 1 << 10, cleaned[:-1]
-    elif cleaned.endswith("m"):
-        scale, cleaned = 1 << 20, cleaned[:-1]
-    try:
-        value = int(cleaned) * scale
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"not a size: {text!r} (try 4096, 4k or 1M)") from None
-    if value <= 0:
-        raise argparse.ArgumentTypeError(f"size must be positive, got {text!r}")
-    return value
-
-
 def parse_values(param: str, text: str) -> list[int | str]:
     """Parse a comma-separated --values list according to ``param``.
 
@@ -507,7 +472,7 @@ def parse_values(param: str, text: str) -> list[int | str]:
                 )
         return [item.lower() for item in items]
     if param == "associativity":
-        return [_positive_int(item) for item in items]
+        return [positive_int(item) for item in items]
     return [parse_size(item) for item in items]
 
 
@@ -522,19 +487,6 @@ def _values_or_error(parser: argparse.ArgumentParser, param: str, text: str) -> 
         return parse_values(param, text)
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
-
-
-def _load_trace(parser: argparse.ArgumentParser, path: str) -> list[tuple[int, bool]]:
-    """Parse a whole trace into memory, turning problems into CLI errors."""
-    try:
-        trace = list(parse_trace(path))
-    except FileNotFoundError:
-        parser.error(f"trace not found: {path} (run `cachesim gen-traces` to create the samples)")
-    except (OSError, ValueError) as exc:
-        parser.error(str(exc))
-    if not trace:
-        parser.error(f"no accesses in {path}")
-    return trace
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -579,7 +531,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--assoc",
-        type=_positive_int,
+        type=positive_int,
         default=4,
         help="fixed associativity for the size sweep (default 4)",
     )
@@ -595,11 +547,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="replacement policy (default lru; for the offline optimum see `cachesim policies`)",
     )
     parser.add_argument(
-        "--hit-time", type=_non_negative_int, default=4, help="cache hit time in cycles (default 4)"
+        "--hit-time", type=non_negative_int, default=4, help="cache hit time in cycles (default 4)"
     )
     parser.add_argument(
         "--mem-time",
-        type=_non_negative_int,
+        type=non_negative_int,
         default=100,
         help="memory access time in cycles (default 100)",
     )
@@ -678,7 +630,7 @@ def _run_single(args: argparse.Namespace, parser: argparse.ArgumentParser, plot_
         if args.values
         else list(DEFAULT_VALUES[args.param])
     )
-    accesses = _load_trace(parser, args.trace)
+    accesses = load_trace(parser, args.trace)
     print(f"trace: {args.trace} ({len(accesses):,} accesses)")
     base = _base_spec(args, args.size, args.assoc)
     try:
@@ -709,7 +661,7 @@ def _run_grid(args: argparse.Namespace, parser: argparse.ArgumentParser, plot_di
     sizes = [int(v) for v in _values_or_error(parser, "size", axis)]
     ways_axis = args.ways or ",".join(str(v) for v in ASSOCIATIVITIES)
     ways = [int(v) for v in _values_or_error(parser, "associativity", ways_axis)]
-    accesses = _load_trace(parser, trace_path)
+    accesses = load_trace(parser, trace_path)
     print(f"trace: {trace_path} ({len(accesses):,} accesses)")
     base = _base_spec(args, args.size, args.assoc)
     grid = sweep_grid(accesses, base, sizes, ways, args.mem_time)
@@ -749,7 +701,7 @@ def _run_default(args: argparse.Namespace, parser: argparse.ArgumentParser, plot
                 f"({args.block_size}*{args.assoc}); pick a power-of-two associativity"
             )
 
-    assoc_accesses = _load_trace(parser, assoc_path)
+    assoc_accesses = load_trace(parser, assoc_path)
     print(f"associativity sweep trace: {assoc_path} ({len(assoc_accesses):,} accesses)")
     assoc_base = _base_spec(args, args.size, args.assoc)
     assoc_rows = sweep(
@@ -757,7 +709,7 @@ def _run_default(args: argparse.Namespace, parser: argparse.ArgumentParser, plot
     )
     print_sweep(assoc_rows, assoc_base, "associativity")
 
-    size_accesses = assoc_accesses if size_path == assoc_path else _load_trace(parser, size_path)
+    size_accesses = assoc_accesses if size_path == assoc_path else load_trace(parser, size_path)
     print(f"\nsize sweep trace: {size_path} ({len(size_accesses):,} accesses)")
     size_base = _base_spec(args, args.size, args.assoc)
     size_rows = sweep(size_accesses, size_base, "size", list(DEFAULT_VALUES["size"]), args.mem_time)

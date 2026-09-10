@@ -28,7 +28,6 @@ from cachesim.sweep import (
     SweepRow,
     main,
     non_monotonic_pairs,
-    parse_size,
     parse_values,
     run_point,
     run_single_level,
@@ -330,16 +329,7 @@ class TestCsv(unittest.TestCase):
 
 
 class TestParsing(unittest.TestCase):
-    def test_parse_size_suffixes(self) -> None:
-        self.assertEqual(parse_size("512"), 512)
-        self.assertEqual(parse_size("4k"), 4096)
-        self.assertEqual(parse_size("4KB"), 4096)
-        self.assertEqual(parse_size("1M"), 1 << 20)
-
-    def test_parse_size_rejects_junk(self) -> None:
-        for bad in ("", "big", "0", "-4k", "4g"):
-            with self.subTest(text=bad), self.assertRaises(argparse.ArgumentTypeError):
-                parse_size(bad)
+    """--values only; the size grammar it borrows is tested in test_cliargs."""
 
     def test_parse_values(self) -> None:
         self.assertEqual(parse_values("size", "1k, 2k,4k"), [1024, 2048, 4096])

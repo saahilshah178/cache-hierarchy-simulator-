@@ -58,9 +58,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from cachesim.cache import Cache
+from cachesim.cliargs import load_trace, non_negative_int, parse_size, positive_int
 from cachesim.plot import format_bytes
 from cachesim.policies import POLICIES
-from cachesim.trace import parse_trace
 
 Accesses = Sequence[tuple[int, bool]]
 
@@ -358,73 +358,29 @@ def format_window_pressure(pressure: WindowPressure) -> str:
 # -- CLI -----------------------------------------------------------------------
 
 
-def _positive_int(text: str) -> int:
-    value = int(text)
-    if value <= 0:
-        raise argparse.ArgumentTypeError(f"must be a positive integer, got {text}")
-    return value
-
-
-def _non_negative_int(text: str) -> int:
-    value = int(text)
-    if value < 0:
-        raise argparse.ArgumentTypeError(f"must be a non-negative integer, got {text}")
-    return value
-
-
-def _parse_size(text: str) -> int:
-    """``'4k'`` -> 4096, ``'2M'`` -> 2097152, ``'512'`` -> 512."""
-    cleaned = text.strip().lower().removesuffix("b")
-    scale = 1
-    if cleaned.endswith("k"):
-        scale, cleaned = 1 << 10, cleaned[:-1]
-    elif cleaned.endswith("m"):
-        scale, cleaned = 1 << 20, cleaned[:-1]
-    try:
-        value = int(cleaned) * scale
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"not a size: {text!r} (try 4096, 4k or 1M)") from None
-    if value <= 0:
-        raise argparse.ArgumentTypeError(f"size must be positive, got {text!r}")
-    return value
-
-
-def _load_trace(parser: argparse.ArgumentParser, path: str) -> list[tuple[int, bool]]:
-    """Parse a whole trace into memory, turning problems into CLI errors."""
-    try:
-        trace = list(parse_trace(path))
-    except FileNotFoundError:
-        parser.error(f"trace not found: {path} (run `cachesim gen-traces` to create the samples)")
-    except (OSError, ValueError) as exc:
-        parser.error(str(exc))
-    if not trace:
-        parser.error(f"no accesses in {path}")
-    return trace
-
-
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Add the ``sets`` options to ``parser``."""
     parser.add_argument("trace", help="trace file (one 'ADDR R|W' per line)")
     parser.add_argument(
-        "--size", type=_parse_size, default=32 * 1024, help="cache size (default 32k)"
+        "--size", type=parse_size, default=32 * 1024, help="cache size (default 32k)"
     )
     parser.add_argument(
-        "--block-size", type=_parse_size, default=64, help="block size in bytes (default 64)"
+        "--block-size", type=parse_size, default=64, help="block size in bytes (default 64)"
     )
-    parser.add_argument("--assoc", type=_positive_int, default=4, help="ways per set (default 4)")
+    parser.add_argument("--assoc", type=positive_int, default=4, help="ways per set (default 4)")
     parser.add_argument(
         "--policy", default="lru", choices=sorted(POLICIES), help="replacement policy (default lru)"
     )
     parser.add_argument(
         "--window",
-        type=_positive_int,
+        type=positive_int,
         default=DEFAULT_WINDOW,
         metavar="W",
         help=f"accesses per pressure window (default {DEFAULT_WINDOW})",
     )
     parser.add_argument(
         "--top",
-        type=_non_negative_int,
+        type=non_negative_int,
         default=8,
         metavar="N",
         help="list the N busiest sets (default 8; 0 to omit)",
@@ -439,7 +395,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     """Execute the ``sets`` command from parsed arguments."""
-    accesses = _load_trace(parser, args.trace)
+    accesses = load_trace(parser, args.trace)
     try:
         hot = hot_sets(accesses, args.size, args.block_size, args.assoc, args.policy)
     except ValueError as exc:
