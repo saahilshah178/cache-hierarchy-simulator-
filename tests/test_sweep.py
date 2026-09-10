@@ -414,6 +414,12 @@ class TestSweepCLI(unittest.TestCase):
             (["--param", "policy", "--values", "nope", self.trace], "unknown policy"),
             (["--param", "policy", "--values", "opt", self.trace], "offline"),
             (["--policy", "opt", self.trace], "invalid choice"),
+            # An empty list is a mistake, not a request for the defaults.
+            (["--param", "size", "--values", "", self.trace], "--values must list"),
+            (["--param", "size", "--values", ",", self.trace], "--values must list"),
+            (["--grid", "--values", "", self.trace], "--values must list"),
+            (["--grid", "--ways", "", self.trace], "--ways must list"),
+            (["--ways", "", self.trace], "only applies to --grid"),
             (["--param", "size", "--grid", self.trace], "mutually exclusive"),
             (["--ways", "1,2", self.trace], "only applies to --grid"),
             (["--param", "size"], "needs a trace"),

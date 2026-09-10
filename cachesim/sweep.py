@@ -471,17 +471,20 @@ def print_grid(grid: SweepGrid) -> None:
 # -- CLI -----------------------------------------------------------------------
 
 
-def parse_values(param: str, text: str) -> list[int | str]:
+def parse_values(param: str, text: str, flag: str = "--values") -> list[int | str]:
     """Parse a comma-separated --values list according to ``param``.
 
     Sizes and block sizes accept the k/M suffixes; associativity takes plain
     integers; policy takes names checked against ``SWEEPABLE_POLICIES``, so
     an offline policy is rejected here rather than raising from the first
     probe of the first point.
+
+    ``flag`` names the option being parsed, so that the grid's ``--ways``
+    axis is not reported as a fault in ``--values``.
     """
     items = [item.strip() for item in text.split(",") if item.strip()]
     if not items:
-        raise argparse.ArgumentTypeError("--values must list at least one value")
+        raise argparse.ArgumentTypeError(f"{flag} must list at least one value")
     if param == "policy":
         for item in items:
             name = item.lower()
@@ -502,7 +505,9 @@ def parse_values(param: str, text: str) -> list[int | str]:
     return [parse_size(item) for item in items]
 
 
-def _values_or_error(parser: argparse.ArgumentParser, param: str, text: str) -> list[int | str]:
+def _values_or_error(
+    parser: argparse.ArgumentParser, param: str, text: str, flag: str = "--values"
+) -> list[int | str]:
     """``parse_values``, reporting a bad list as a CLI error.
 
     ``--values`` cannot use argparse's ``type=`` hook because how it parses
@@ -510,7 +515,7 @@ def _values_or_error(parser: argparse.ArgumentParser, param: str, text: str) -> 
     ``parser.error`` here instead of escaping as a traceback.
     """
     try:
-        return parse_values(param, text)
+        return parse_values(param, text, flag)
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
 
@@ -644,7 +649,12 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     """Execute a sweep from parsed arguments."""
     if args.grid and args.param:
         parser.error("--grid and --param are mutually exclusive")
-    if args.ways and not args.grid:
+    # `is not None`, not truthiness: an empty --values/--ways is a mistake the
+    # user made, and parse_values already has the message for it. Falling back
+    # to the default list would run a different sweep than the one asked for
+    # and report success -- which is what `--values "$SIZES"` does when SIZES
+    # is unset.
+    if args.ways is not None and not args.grid:
         parser.error("--ways only applies to --grid")
     plot_dir = args.plot_dir if args.plot_dir is not None else "plots"
 
@@ -661,7 +671,7 @@ def _run_single(args: argparse.Namespace, parser: argparse.ArgumentParser, plot_
         parser.error(f"--param {args.param} needs a trace argument")
     values = (
         _values_or_error(parser, args.param, args.values)
-        if args.values
+        if args.values is not None
         else list(DEFAULT_VALUES[args.param])
     )
     accesses = load_trace_or_error(parser, args.trace)
@@ -692,10 +702,12 @@ def _run_single(args: argparse.Namespace, parser: argparse.ArgumentParser, plot_
 def _run_grid(args: argparse.Namespace, parser: argparse.ArgumentParser, plot_dir: str) -> int:
     """--grid: size against associativity."""
     trace_path = args.trace or "traces/matmul_naive.trace"
-    axis = args.values or ",".join(str(v) for v in DEFAULT_VALUES["size"])
+    axis = (
+        args.values if args.values is not None else ",".join(str(v) for v in DEFAULT_VALUES["size"])
+    )
     sizes = [int(v) for v in _values_or_error(parser, "size", axis)]
-    ways_axis = args.ways or ",".join(str(v) for v in ASSOCIATIVITIES)
-    ways = [int(v) for v in _values_or_error(parser, "associativity", ways_axis)]
+    ways_axis = args.ways if args.ways is not None else ",".join(str(v) for v in ASSOCIATIVITIES)
+    ways = [int(v) for v in _values_or_error(parser, "associativity", ways_axis, "--ways")]
     accesses = load_trace_or_error(parser, trace_path)
     print(f"trace: {trace_path} ({len(accesses):,} accesses)")
     base = _base_spec(args, args.size, args.assoc)
