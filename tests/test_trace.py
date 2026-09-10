@@ -104,8 +104,8 @@ class TestNativeFastPath(TraceFileCase):
 
     #: Lines the fast path must not take, each with the reason.
     NOT_CANONICAL: ClassVar[dict[str, str]] = {
-        "0x0x123456 R": "a second 0x prefix, which int() accepts and _HEX does not",
-        "0x  123456 R": "int() ignores surrounding space; the field split does not",
+        "0x0x123456 R": "a doubled 0x prefix, which int() rejects and _HEX rejects",
+        "0x  123456 R": "the space is inside the address, so this is three fields",
         "0x 123456 R": "three fields, not two",
         "0x12_3456 R": "int() accepts underscores; the format does not",
         "+0x123456 R": "a sign",
@@ -123,6 +123,46 @@ class TestNativeFastPath(TraceFileCase):
         "0x123456": "one field",
         "0x123456 R 8": "three fields",
     }
+
+    #: The corpus lines whose ADDRESS FIELD ``int(..., 16)`` decodes even
+    #: though the format rejects it. These are the sharp ones: a guard that
+    #: let one through would hand back a number where the format calls for
+    #: an error, rather than failing loudly. Which lines those are is
+    #: asserted below rather than left to the reasons above, because a
+    #: reason above was wrong once: "0x0x123456" reads like something
+    #: ``int()`` would take, and ``int()`` refuses it outright.
+    INT_DECODES_A_BAD_ADDRESS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "0x12_3456 R",  # -> 1193046; int() allows digit separators
+            "+0x123456 R",  # -> 1193046; int() allows a sign
+            "-0x123456 R",  # -> -1193046; ditto, and negative
+            "\uff10x10 R",  # -> 16; int() normalises the fullwidth zero
+        }
+    )
+
+    def test_only_these_lines_have_an_int_decodable_bad_address(self) -> None:
+        """Prose about what ``int()`` accepts is worth nothing unchecked.
+
+        The check mirrors the one in ``_parse_native``: decode the field,
+        then reject a negative, a non-ASCII or a non-``_HEX`` spelling.
+        Every line it names is one the general path must catch after
+        ``int()`` has already produced a number.
+        """
+        from cachesim.trace import _HEX
+
+        decodable = set()
+        for line in self.NOT_CANONICAL:
+            fields = line.split("#", 1)[0].strip().split()
+            if not fields:
+                continue
+            addr_str = fields[0]
+            try:
+                addr = int(addr_str, 16)
+            except ValueError:
+                continue
+            if addr < 0 or not addr_str.isascii() or not _HEX.fullmatch(addr_str):
+                decodable.add(line)
+        self.assertEqual(decodable, set(self.INT_DECODES_A_BAD_ADDRESS))
 
     def test_the_pattern_matches_only_canonical_lines(self) -> None:
         from cachesim.trace import _NATIVE_LINE
