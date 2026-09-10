@@ -100,7 +100,16 @@ def register_run(subparsers: Subparsers) -> None:
     p.set_defaults(func=_cmd_run)
 
 
-def _cmd_gen_traces(args: argparse.Namespace) -> int:
+def _cmd_gen_traces(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    # The names are validated here rather than with argparse ``choices``:
+    # before Python 3.12 argparse checks the empty default of a ``nargs="*"``
+    # positional against the choices and rejects a bare ``gen-traces``.
+    unknown = [name for name in args.names if name not in WORKLOADS]
+    if unknown:
+        parser.error(
+            f"unknown workload(s) {', '.join(map(repr, unknown))} "
+            f"(choose from {', '.join(sorted(WORKLOADS))})"
+        )
     if args.list:
         for workload in WORKLOADS.values():
             print(workload.name)
@@ -133,7 +142,6 @@ def register_gen_traces(subparsers: Subparsers) -> None:
     p.add_argument(
         "names",
         nargs="*",
-        choices=sorted(WORKLOADS),
         metavar="NAME",
         help=f"workloads to write (default: the {len(SAMPLE_NAMES)} samples "
         f"{', '.join(SAMPLE_NAMES)}); see --list",
@@ -144,7 +152,7 @@ def register_gen_traces(subparsers: Subparsers) -> None:
         action="store_true",
         help="print every workload's name, description and expectation, and write nothing",
     )
-    p.set_defaults(func=_cmd_gen_traces)
+    p.set_defaults(func=lambda args: _cmd_gen_traces(args, p))
 
 
 def _register_sweep(subparsers: Subparsers) -> None:

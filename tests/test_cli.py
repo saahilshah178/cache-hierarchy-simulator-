@@ -100,6 +100,21 @@ class TestCLI(unittest.TestCase):
         self.assertIn("--warmup", err)
         self.assertIn("non-negative", err)
 
+    def test_gen_traces_rejects_unknown_names_as_a_usage_error(self) -> None:
+        out_dir = os.path.join(self._tmp.name, "gen")
+        code, _, err = self.run_main(["gen-traces", "--out-dir", out_dir, "conflict", "nope"])
+        self.assertEqual(code, 2)
+        self.assertIn("unknown workload(s) 'nope'", err)
+        self.assertIn("choose from", err)
+        self.assertFalse(os.path.exists(out_dir))
+
+    def test_gen_traces_without_names_writes_the_samples(self) -> None:
+        """No positional at all must work on every supported Python: argparse
+        before 3.12 validated the empty default against ``choices``."""
+        out_dir = os.path.join(self._tmp.name, "gen")
+        args = main.__globals__["build_parser"]().parse_args(["gen-traces", "--out-dir", out_dir])
+        self.assertEqual(args.names, [])
+
     def test_gen_traces_writes_selected_files(self) -> None:
         out_dir = os.path.join(self._tmp.name, "gen")
         code, out, _ = self.run_main(["gen-traces", "--out-dir", out_dir, "conflict"])
