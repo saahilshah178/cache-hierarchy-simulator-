@@ -40,16 +40,24 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
         f"DRAM reads     : {s.dram_reads:>12,}"
         f"   ({_pct(s.dram_reads, s.accesses).strip()} of all accesses missed every level)"
     )
-    lines.append(
-        f"DRAM writes    : {s.dram_writes:>12,}"
-        f"   (dirty lines written back from {s.levels[-1].name})"
-    )
+    if s.dram_demand_writes:
+        detail = (
+            f"(modified blocks leaving {s.levels[-1].name}; "
+            f"{s.dram_demand_writes:,} were stores no level allocated for)"
+        )
+    else:
+        detail = f"(dirty lines written back from {s.levels[-1].name})"
+    lines.append(f"DRAM writes    : {s.dram_writes:>12,}   {detail}")
     lines.append("")
 
     for i, lv in enumerate(s.levels):
         # Only features that are switched on appear in the header, so a
         # default hierarchy reports exactly what it used to.
         extra = "" if lv.inclusion == "nine" else f", {lv.inclusion} of {s.levels[i - 1].name}"
+        if lv.write_policy != "write-back":
+            extra += f", {lv.write_policy}"
+        if not lv.write_allocate:
+            extra += ", no-write-allocate"
         lines.append(
             f"--- {lv.name}: {_size_str(lv.size)}, {lv.block_size} B blocks, "
             f"{lv.associativity}-way, {lv.policy.upper()}, hit time {lv.hit_time} cyc"
@@ -82,6 +90,16 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
             lines.append(
                 f"  back-invalidated    : {lv.back_invalidations:>6,}"
                 "   (lines dropped because an inclusive level below evicted the block)"
+            )
+        if lv.write_throughs:
+            lines.append(
+                f"  write-throughs      : {lv.write_throughs:>6,}"
+                "   (stores duplicated to the level below)"
+            )
+        if lv.write_bypasses:
+            lines.append(
+                f"  write bypasses      : {lv.write_bypasses:>6,}"
+                "   (write misses passed down instead of allocating)"
             )
         c3 = lv.three_c
         if c3 is not None and lv.misses:

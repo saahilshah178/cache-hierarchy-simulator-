@@ -46,6 +46,8 @@ class LevelStats:
     policy: str
     hit_time: int
     inclusion: str
+    write_policy: str
+    write_allocate: bool
     accesses: int
     hits: int
     misses: int
@@ -62,6 +64,8 @@ class LevelStats:
     writebacks_received: int
     writeback_allocations: int
     back_invalidations: int
+    write_throughs: int
+    write_bypasses: int
     three_c: ThreeCStats | None
 
 
@@ -74,6 +78,7 @@ class HierarchyStats:
     writes: int
     dram_reads: int
     dram_writes: int
+    dram_demand_writes: int
     memory_access_time: int
     total_cycles: int
     amat: float
@@ -112,6 +117,8 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
                 policy=c.policy_name,
                 hit_time=level.hit_time,
                 inclusion=level.inclusion,
+                write_policy=level.write_policy,
+                write_allocate=level.write_allocate,
                 accesses=c.accesses,
                 hits=c.hits,
                 misses=c.misses,
@@ -128,6 +135,8 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
                 writebacks_received=c.writebacks_received,
                 writeback_allocations=c.writeback_allocations,
                 back_invalidations=level.back_invalidations,
+                write_throughs=level.write_throughs,
+                write_bypasses=level.write_bypasses,
                 three_c=three_c,
             )
         )
@@ -137,6 +146,7 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
         writes=h.writes,
         dram_reads=h.dram_reads,
         dram_writes=h.dram_writes,
+        dram_demand_writes=h.dram_demand_writes,
         memory_access_time=h.memory_access_time,
         total_cycles=h.total_time,
         amat=h.amat(),

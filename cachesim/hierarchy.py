@@ -12,16 +12,19 @@ Modelling choices:
 
 * Allocate-on-miss at every level: when a level misses, the block is
   installed into that level as part of the same access.
-* Write-back, write-allocate at every level. A store dirties the line in
-  L1 only; the levels below supply the line, so they see a read. When a
-  dirty line is evicted from level i it is written into level i+1: the
-  copy there is marked dirty, or the line is allocated dirty if level i+1
-  no longer holds it (which may evict another line, handled the same way).
-  A dirty line evicted from the last level is written to DRAM.
+* Write-back, write-allocate at every level by default. A store dirties
+  the line in L1 only; the levels below supply the line, so they see a
+  read. When a dirty line is evicted from level i it is written into
+  level i+1: the copy there is marked dirty, or the line is allocated
+  dirty if level i+1 no longer holds it (which may evict another line,
+  handled the same way). A dirty line evicted from the last level is
+  written to DRAM. Each level may instead be write-through and/or
+  no-write-allocate (see below).
 * Timing charges each level's hit time once per level probed, plus the
-  memory access time if everything missed. Write-back traffic is counted
-  (``Cache.writebacks``, ``Hierarchy.dram_writes``) but not charged time,
-  as if fully absorbed by write buffers.
+  memory access time if everything missed. Traffic generated *behind* a
+  satisfied access -- write-back evictions and the duplicate stores a
+  write-through level sends down -- is counted but not charged time, as
+  if fully absorbed by write buffers.
 * Each level declares an ``inclusion`` policy describing its relation to
   the level above it (see below). The default is NINE, which enforces
   nothing.
@@ -29,6 +32,34 @@ Modelling choices:
 The model is functional (exact hit/miss/eviction behaviour) with a serial,
 fixed-latency timing model; it does not model overlap of misses (MSHRs),
 DRAM banks, or bandwidth.
+
+Write policies
+--------------
+
+Two orthogonal keys per level (Hennessy and Patterson, "Computer
+Architecture: A Quantitative Approach", 6th ed., 2017, Appendix B.1):
+
+``write_policy``
+    ``"write-back"`` (default) marks the line dirty and tells the level
+    below only when the line is evicted. ``"write-through"`` applies the
+    store here *and* sends a duplicate down as a store, which the level
+    below handles under its own policy; a write-through level therefore
+    never holds a dirty line, and a store that passes the last level is a
+    DRAM write. Those duplicates are untimed.
+
+``write_allocate``
+    ``true`` (default) fetches the line on a write miss, so the store is
+    applied here. ``false`` leaves this level untouched and passes the
+    store to the level below, which sees a store rather than a line fill.
+    Loads are unaffected.
+
+A store that no level allocates for reaches DRAM directly, without ever
+fetching the block. Unlike the untimed traffic above, a store still
+looking for a level to take it is the access itself and is charged each
+level's hit time (and the memory access time if it gets that far), exactly
+as a load miss is. That is what keeps every level's access count equal to
+the miss count of the level above it, and hence keeps analytic and
+measured AMAT identical.
 
 Inclusion policies
 ------------------
@@ -101,16 +132,28 @@ class Level:
 
     Parameters
     ----------
-    cache     : the cache at this level.
-    hit_time  : cycles charged for probing this level, hit or miss.
-    inclusion : "nine" (default), "inclusive", or "exclusive"; see the
-                module docstring. It constrains this level against the one
-                ABOVE it, so the first level of a hierarchy must be "nine".
+    cache          : the cache at this level.
+    hit_time       : cycles charged for probing this level, hit or miss.
+    inclusion      : "nine" (default), "inclusive", or "exclusive"; see the
+                     module docstring. It constrains this level against the
+                     one ABOVE it, so the first level must be "nine".
+    write_policy   : "write-back" (default) or "write-through".
+    write_allocate : whether a write miss fetches the line into this level
+                     (default) or passes the store to the level below.
     """
 
-    def __init__(self, cache: Cache, hit_time: int, inclusion: str = "nine") -> None:
+    def __init__(
+        self,
+        cache: Cache,
+        hit_time: int,
+        inclusion: str = "nine",
+        write_policy: str = "write-back",
+        write_allocate: bool = True,
+    ) -> None:
         if inclusion not in ("nine", "inclusive", "exclusive"):
             raise ValueError(f"{cache.name}: unknown inclusion policy {inclusion!r}")
+        if write_policy not in ("write-back", "write-through"):
+            raise ValueError(f"{cache.name}: unknown write policy {write_policy!r}")
         self.cache = cache
         self.hit_time = hit_time
         self.inclusion = inclusion
@@ -118,14 +161,27 @@ class Level:
         self.inclusive = inclusion == "inclusive"
         #: True if this level must stay disjoint from the level above.
         self.exclusive = inclusion == "exclusive"
+        self.write_policy = write_policy
+        #: True if every store applied here is also sent to the level below,
+        #: so that no line here is ever dirty.
+        self.write_through = write_policy == "write-through"
+        self.write_allocate = write_allocate
 
         #: Lines removed from this level because an inclusive level below it
         #: evicted the block (back-invalidations received, not sent).
         self.back_invalidations = 0
+        #: Stores duplicated to the level below because this level is
+        #: write-through.
+        self.write_throughs = 0
+        #: Write misses this level declined to allocate for, passing the
+        #: store to the level below instead (no-write-allocate).
+        self.write_bypasses = 0
 
     def reset_stats(self) -> None:
         """Zero this level's counters, including the cache's."""
         self.back_invalidations = 0
+        self.write_throughs = 0
+        self.write_bypasses = 0
         self.cache.reset_stats()
 
 
@@ -161,7 +217,8 @@ class Hierarchy:
         self.reads = 0
         self.writes = 0
         self.dram_reads = 0  # demand fetches that missed every level
-        self.dram_writes = 0  # dirty lines written back from the last level
+        self.dram_writes = 0  # blocks of modified data written out to DRAM
+        self.dram_demand_writes = 0  # ... of which were stores no level allocated for
         self.total_time = 0  # simulated cycles spent on all accesses
 
     # -- construction helper --------------------------------------------------
@@ -184,7 +241,15 @@ class Hierarchy:
                 )
             except ValueError as exc:
                 raise ConfigError(str(exc)) from None
-            levels.append(Level(cache, level.hit_time, inclusion=level.inclusion))
+            levels.append(
+                Level(
+                    cache,
+                    level.hit_time,
+                    inclusion=level.inclusion,
+                    write_policy=level.write_policy,
+                    write_allocate=level.write_allocate,
+                )
+            )
         return cls(levels, spec.memory_access_time)
 
     @classmethod
@@ -205,9 +270,18 @@ class Hierarchy:
 
         The access probes levels top-down until one hits (or DRAM is
         reached), then fills the block into every level that missed,
-        bottom-up, handling each eviction those fills cause. Exclusive
-        levels are not filled by the fetch; a block that hit in one is
-        moved out of it and up instead.
+        bottom-up, handling each eviction those fills cause.
+
+        A store carries its write intent down only until some level takes
+        it: that level applies the store (marking the line dirty unless it
+        is write-through) and the levels below it see the remainder of the
+        access as a plain line fill, exactly as they always did. A level
+        that does not allocate on a write miss simply passes the store on,
+        so the next level down sees a store rather than a fill. If no level
+        takes the store it becomes a DRAM write.
+
+        Exclusive levels are not filled by the fetch; a block that hit in
+        one is moved out of it and up instead.
         """
         if addr < 0:
             raise ValueError(f"address must be non-negative, got {addr}")
@@ -219,23 +293,47 @@ class Hierarchy:
 
         block = addr // self.block_size
         levels = self.levels
+        nlevels = len(levels)
         time = 0
-        hit_level = len(levels)
-        for i, level in enumerate(levels):
+        hit_level = nlevels
+        write = is_write  # the store is still looking for a level to take it
+        taken = -1  # the level that took it (-1: a load, or nobody yet)
+        fill_from = 0  # topmost level this access fills
+        forward_from = -1  # level a write-through duplicate must be sent to
+        for i in range(nlevels):
+            level = levels[i]
             time += level.hit_time  # pay to probe this level
-            # Only the first level sees the write intent: with write-back
-            # caches, a store that misses L1 asks the levels below for the
-            # line (a read); the data itself is only modified in L1.
-            if level.cache.probe(block, is_write and i == 0):
+            if level.cache.probe(block, write):
                 hit_level = i
+                if write:
+                    taken = fill_from = i  # it is already here; nothing to fill
+                    if level.write_through:
+                        level.cache.clean(block)
+                        forward_from = i + 1
                 break
+            if write:
+                if not level.write_allocate:
+                    level.write_bypasses += 1
+                    continue  # no line here; the store goes on down
+                taken = fill_from = i
+                write = False  # below this, the access is an ordinary fill
+                if level.write_through:
+                    forward_from = i + 1
         else:
+            if write:
+                # No level allocates on a write miss: the store goes to DRAM
+                # without ever fetching the block.
+                time += self.memory_access_time
+                self.dram_demand_writes += 1
+                self._write_to_memory(block)
+                self.total_time += time
+                return time
             # Missed every level: fetch from DRAM.
             time += self.memory_access_time
             self.dram_reads += 1
 
-        dirty = is_write
-        if self._has_exclusive and hit_level > 0 and hit_level < len(levels):
+        dirty = taken >= 0 and not levels[taken].write_through
+        if self._has_exclusive and fill_from < hit_level < nlevels:
             # An exclusive level does not keep a block the level above is
             # about to hold: the block moves up, dirty bit and all.
             level = levels[hit_level]
@@ -244,19 +342,20 @@ class Hierarchy:
                 if removed is not None and removed.dirty:
                     dirty = True
 
-        # Fill the block into every level above the one that supplied it.
-        # The topmost level filled takes the dirty bit; exclusive levels are
-        # filled only by the evictions of the level above them.
-        top = 0
-        if self._has_exclusive:
-            while top < hit_level and levels[top].exclusive:
-                top += 1
-        for i in range(hit_level - 1, -1, -1):
-            if self._has_exclusive and levels[i].exclusive:
+        # Fill the block into every level between the one that took the
+        # store (level 0 for a load) and the one that supplied it. Exclusive
+        # levels are filled only by the evictions of the level above them,
+        # unless this very store is what they took.
+        for i in range(hit_level - 1, fill_from - 1, -1):
+            if self._has_exclusive and levels[i].exclusive and i != taken:
                 continue
-            evicted = levels[i].cache.allocate(block, dirty=dirty and i == top)
+            evicted = levels[i].cache.allocate(block, dirty=dirty and i == fill_from)
             if evicted is not None:
                 self._handle_eviction(i, evicted)
+
+        if forward_from >= 0:
+            levels[forward_from - 1].write_throughs += 1
+            self._write_back(forward_from, block)
 
         self.total_time += time
         return time
@@ -278,13 +377,20 @@ class Hierarchy:
         """
         below = level_index + 1
         if self._has_exclusive and below < len(self.levels) and self.levels[below].exclusive:
-            cache = self.levels[below].cache
+            level = self.levels[below]
+            cache = level.cache
+            keep_dirty = evicted.dirty and not level.write_through
             if evicted.dirty:
                 cache.writebacks_received += 1
                 cache.writeback_allocations += 1
-            passed_on = cache.allocate(evicted.block, dirty=evicted.dirty)
+            passed_on = cache.allocate(evicted.block, dirty=keep_dirty)
             if passed_on is not None:
                 self._handle_eviction(below, passed_on)
+            if evicted.dirty and not keep_dirty:
+                # A write-through victim buffer holds no dirty data: the
+                # modified block continues on down.
+                level.write_throughs += 1
+                self._write_back(below + 1, evicted.block)
         elif evicted.dirty:
             self._write_back(below, evicted.block)
         if self.levels[level_index].inclusive:
@@ -309,22 +415,57 @@ class Hierarchy:
                 self._write_back(level_index + 1, block)
 
     def _write_back(self, level_index: int, block: int) -> None:
-        """Deliver a dirty block to ``levels[level_index]`` (or DRAM past the end).
+        """Deliver a block of modified data to ``levels[level_index]``.
 
-        The receiving level marks its copy dirty, or allocates the block
-        dirty if it no longer holds it; an eviction caused by that
-        allocation is handled recursively.
+        This is the one path by which modified data travels downwards,
+        whether it came from a write-back eviction above, from a
+        write-through duplicate, or from a store no level above allocated
+        for. The receiving level applies its own write policy:
+
+        * write-back: mark the copy dirty, or allocate the block dirty if
+          the level no longer holds it. An eviction caused by that
+          allocation is handled recursively. The data stops here.
+        * write-through: the level never holds dirty data, so it allocates
+          a clean line (if it allocates on write misses at all) and the
+          data continues to the next level.
+        * no-write-allocate on a miss: nothing is installed and the data
+          continues to the next level.
+
+        Data that runs past the last level is written to DRAM. Nothing on
+        this path is charged simulated time: it is assumed to be absorbed
+        by write buffers and drained off the critical path.
+
+        A level that allocates for data arriving from above installs the
+        block without fetching it from below. The simulator tracks block
+        presence rather than bytes, so the partial-line read that real
+        hardware would issue has no effect on any counter it keeps.
         """
-        if level_index >= len(self.levels):
-            self._write_to_memory(block)
+        levels = self.levels
+        nlevels = len(levels)
+        while level_index < nlevels:
+            level = levels[level_index]
+            cache = level.cache
+            cache.writebacks_received += 1
+            if level.write_through:
+                if level.write_allocate and not cache.contains(block):
+                    cache.writeback_allocations += 1
+                    evicted = cache.allocate(block, dirty=False)
+                    if evicted is not None:
+                        self._handle_eviction(level_index, evicted)
+                level.write_throughs += 1
+                level_index += 1
+                continue
+            if not cache.mark_dirty(block):
+                if not level.write_allocate:
+                    level.write_bypasses += 1
+                    level_index += 1
+                    continue
+                cache.writeback_allocations += 1
+                evicted = cache.allocate(block, dirty=True)
+                if evicted is not None:
+                    self._handle_eviction(level_index, evicted)
             return
-        cache = self.levels[level_index].cache
-        cache.writebacks_received += 1
-        if not cache.mark_dirty(block):
-            cache.writeback_allocations += 1
-            evicted = cache.allocate(block, dirty=True)
-            if evicted is not None:
-                self._handle_eviction(level_index, evicted)
+        self._write_to_memory(block)
 
     def _write_to_memory(self, block: int) -> None:
         """A dirty block leaves the last level: one DRAM write."""
@@ -385,7 +526,7 @@ class Hierarchy:
         describe steady-state behaviour rather than cold caches.
         """
         self.accesses = self.reads = self.writes = 0
-        self.dram_reads = self.dram_writes = 0
+        self.dram_reads = self.dram_writes = self.dram_demand_writes = 0
         self.total_time = 0
         for level in self.levels:
             level.reset_stats()

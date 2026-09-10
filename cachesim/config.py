@@ -29,6 +29,8 @@ key                     default        effect
 ``track_3c``            ``true``       run the 3-C shadow cache
 ``rng_seed``            ``0``          seed for the random policy
 ``inclusion``           ``"nine"``     relation to the level ABOVE
+``write_policy``        ``"write-back"``  when stores reach the level below
+``write_allocate``      ``true``       whether a write miss allocates here
 ======================  =============  ==================================
 """
 
@@ -68,6 +70,23 @@ class ConfigError(ValueError):
 #: Multi-Level Cache Hierarchies", ISCA 1988.
 INCLUSION_POLICIES = ("nine", "inclusive", "exclusive")
 
+#: What a level does with a store once it has been applied here.
+#:
+#: write-back
+#:     The line is marked dirty and the level below is told only when the
+#:     line is evicted. This is the default.
+#: write-through
+#:     The store is also forwarded to the level below as a store, which
+#:     applies its own policy in turn; lines at a write-through level are
+#:     therefore never dirty, and a store that passes the last level
+#:     becomes a DRAM write.
+#:
+#: Orthogonally, ``write_allocate`` decides what a write MISS does: fetch
+#: the line into this level (the default) or leave it alone and pass the
+#: store to the level below. See Hennessy and Patterson, "Computer
+#: Architecture: A Quantitative Approach", 6th ed., 2017, Appendix B.1.
+WRITE_POLICIES = ("write-back", "write-through")
+
 
 @dataclass(frozen=True)
 class CacheSpec:
@@ -75,6 +94,8 @@ class CacheSpec:
 
     ``inclusion`` describes this level's relation to the level ABOVE it (see
     ``INCLUSION_POLICIES``), so the first level must leave it at ``"nine"``.
+    ``write_policy`` and ``write_allocate`` describe what stores do here
+    (see ``WRITE_POLICIES``).
     """
 
     name: str
@@ -87,6 +108,8 @@ class CacheSpec:
     rng_seed: int = 0
     index: str = DEFAULT_INDEX
     inclusion: str = "nine"
+    write_policy: str = "write-back"
+    write_allocate: bool = True
 
 
 @dataclass(frozen=True)
@@ -216,6 +239,21 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
             f"choose from {', '.join(INCLUSION_POLICIES)}"
         )
 
+    write_policy = spec.get("write_policy", "write-back")
+    if not isinstance(write_policy, str):
+        raise ConfigError(f"{where}: 'write_policy' must be a string, got {write_policy!r}")
+    write_policy = write_policy.lower()
+    if write_policy not in WRITE_POLICIES:
+        raise ConfigError(
+            f"{where}: unknown write policy {write_policy!r}; "
+            f"choose from {', '.join(WRITE_POLICIES)}"
+        )
+    write_allocate = spec.get("write_allocate", True)
+    if not isinstance(write_allocate, bool):
+        raise ConfigError(
+            f"{where}: 'write_allocate' must be true or false, got {write_allocate!r}"
+        )
+
     return CacheSpec(
         name=name,
         size=_require_int(where, "size", spec["size"], 1),
@@ -227,6 +265,8 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
         rng_seed=_require_int(where, "rng_seed", spec.get("rng_seed", 0), -(1 << 63)),
         index=index,
         inclusion=inclusion,
+        write_policy=write_policy,
+        write_allocate=write_allocate,
     )
 
 
