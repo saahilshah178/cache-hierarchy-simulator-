@@ -31,11 +31,8 @@ from cachesim.sweep import (
     non_monotonic_pairs,
     parse_values,
     run_point,
-    run_single_level,
     sweep,
-    sweep_associativity,
     sweep_grid,
-    sweep_size,
     write_csv,
 )
 from cachesim.workloads import conflict_streams, matmul, write_trace
@@ -356,34 +353,6 @@ class TestParsing(unittest.TestCase):
         for name in DEFAULT_VALUES["policy"]:
             with self.subTest(policy=name):
                 self.assertFalse(POLICIES[str(name)].sees_references)
-
-
-class TestLegacyWrappers(unittest.TestCase):
-    """The pre-rewrite helpers still work; they now return SweepRow."""
-
-    def test_run_single_level_amat(self) -> None:
-        trace = [(0, False), (0, False), (64, False), (64, False)]
-        miss_rate, amat, cache = run_single_level(trace, 1024, 64, 1, "lru", 4, 100)
-        self.assertEqual(miss_rate, 0.5)
-        self.assertEqual(amat, 4 + 0.5 * 100)
-        self.assertEqual(cache.misses, 2)
-
-    def test_sweep_associativity_wrapper(self) -> None:
-        trace = as_accesses(conflict_streams(words_per_stream=1024))
-        with contextlib.redirect_stdout(io.StringIO()):
-            rows = sweep_associativity(trace, 8192, 64, "lru", 4, 100)
-        self.assertEqual([row.value for row in rows], list(ASSOCIATIVITIES))
-        self.assertEqual(rates(rows)[4], 0.125)
-
-    def test_sweep_size_wrapper_uses_bytes(self) -> None:
-        trace = as_accesses(conflict_streams(words_per_stream=256))
-        with contextlib.redirect_stdout(io.StringIO()):
-            rows = sweep_size(trace, 4, 64, "lru", 4, 100)
-        self.assertEqual(
-            [row.value for row in rows], [kb * 1024 for kb in (1, 2, 4, 8, 16, 32, 64)]
-        )
-        for row in rows:
-            self.assertEqual(row.miss_rate, 0.125)
 
 
 class TestSweepCLI(unittest.TestCase):
