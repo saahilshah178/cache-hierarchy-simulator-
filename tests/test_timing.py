@@ -14,6 +14,7 @@ from cachesim.cache import Cache
 from cachesim.config import ConfigError, parse_config
 from cachesim.hierarchy import Hierarchy, Level
 from cachesim.workloads import matmul, sequential
+from tests.helpers import SKIP_SLOW
 
 
 def single(bus_width: int | None, block_size: int = 64) -> Hierarchy:
@@ -285,11 +286,15 @@ class TestSampleTraceBlockSizeTable(unittest.TestCase):
         self.assertAlmostEqual(amats[512], 6.0625)
         self.assertEqual(sorted(amats, key=lambda b: amats[b])[0], 512)
 
+    @unittest.skipIf(SKIP_SLOW, "CACHESIM_SKIP_SLOW is set")
     def test_the_matmul_naive_column_bottoms_out_at_256_bytes(self) -> None:
         """The same geometry on the 64x64 naive matrix multiply: the miss
         rate keeps falling from 128 B to 512 B, but AMAT turns at 256 B
         because the 32-cycle transfer of a 512 B block costs more than the
-        692 misses it saves."""
+        692 misses it saves.
+
+        Gated: it builds a 64x64 matmul stream and simulates it three
+        times, which is the second-longest test in the suite."""
         stream = [(addr, op == "W") for addr, op in matmul(n=64)]
         rates, amats = {}, {}
         for block_size in (128, 256, 512):

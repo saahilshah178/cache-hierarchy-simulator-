@@ -28,9 +28,7 @@ from dataclasses import dataclass
 
 from cachesim import run_trace
 from cachesim.workloads import SAMPLE_NAMES, write_traces
-
-#: Set to anything but "" or "0" to skip this module's tests.
-SKIP_SLOW = os.environ.get("CACHESIM_SKIP_SLOW", "") not in ("", "0")
+from tests.helpers import SKIP_SLOW
 
 
 @dataclass(frozen=True)

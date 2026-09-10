@@ -39,7 +39,11 @@ packages = ["cachesim"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# No -q here. It is not a hidden baseline worth having: a caller who adds
+# their own -q (as every doc snippet and CI log does) would reach verbosity
+# -2, at which pytest prints the progress dots and no "N passed in T s"
+# summary at all -- which is how a newly skipped test or a creeping runtime
+# stays invisible in a green log.
 
 [tool.ruff]
 line-length = 100

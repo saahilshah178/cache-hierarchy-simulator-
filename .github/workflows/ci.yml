@@ -29,10 +29,13 @@ jobs:
           cachesim run --format json --config configs/prefetch_stride.json traces/conflict.trace > /dev/null
           cachesim trace-stats traces/conflict.trace
           cachesim sweep --size 8192 traces/conflict.trace
-          cachesim policies --size 8192 traces/conflict.trace
-          cachesim mrc traces/conflict.trace --sets 64
+          # No --values: the default policy list must be one this can run.
+          cachesim sweep --param policy --no-plot traces/conflict.trace
+          cachesim policies --size 8k traces/conflict.trace
+          cachesim mrc traces/conflict.trace --sets 64 --block-size 1k
           cachesim compare traces/conflict.trace --config default --config configs/victim_cache.json
           cachesim sets traces/conflict.trace --size 4k --assoc 1
+          cachesim bench traces/conflict.trace --repeat 1
 
   lint:
     name: lint and type-check

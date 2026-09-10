@@ -39,7 +39,7 @@ import unittest
 from typing import Any
 
 try:
-    from hypothesis import HealthCheck, given, settings
+    from hypothesis import given, settings
     from hypothesis import strategies as st
 except ImportError as exc:  # pragma: no cover - exercised only without the extra
     raise unittest.SkipTest(
@@ -54,13 +54,20 @@ from cachesim.hierarchy import Hierarchy
 Access = tuple[int, bool]
 
 #: Shared budget: enough examples to be worth running, small enough that the
-#: whole module stays under a couple of seconds. Deadlines are disabled
-#: because a large geometry can make one example much slower than the rest.
-EXAMPLES = settings(
-    max_examples=100,
-    deadline=None,
-    suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
-)
+#: whole module stays under a couple of seconds.
+#:
+#: The per-example DEADLINE is disabled because a large geometry legitimately
+#: makes one example much slower than the rest, and that is a property of the
+#: strategies rather than a fault.
+#:
+#: The health checks are NOT suppressed. ``too_slow`` fires when generating
+#: examples starts costing about a second, which is hypothesis's own guard
+#: against a strategy quietly becoming pathological; suppressing it means a
+#: regression in ``hierarchy_specs()`` or ``streams()`` shows up only as the
+#: suite getting slower every release, with nothing failing. The whole module
+#: runs in under two seconds with the checks on, so there is nothing to
+#: suppress.
+EXAMPLES = settings(max_examples=100, deadline=None)
 
 BLOCK_SIZES = st.sampled_from([8, 16, 32, 64])
 POLICIES = st.sampled_from(["lru", "fifo", "random"])
