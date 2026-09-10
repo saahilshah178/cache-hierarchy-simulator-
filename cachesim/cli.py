@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from typing import TypeAlias
 
 from cachesim import __version__, run_trace
+from cachesim.benchcmd import register as register_bench
 from cachesim.config import DEFAULT_CONFIG, ConfigError, load_config
 from cachesim.invariants import check_hierarchy
 from cachesim.report import print_report
@@ -180,6 +181,7 @@ COMMANDS: list[Callable[[Subparsers], None]] = [
     _register_compare,
     _register_sets,
     register_gen_traces,
+    register_bench,
 ]
 
 
