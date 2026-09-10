@@ -282,7 +282,10 @@ def _check_level_structure(s: _Sweep, c: Cache) -> None:
         f"a block is held in more than one way ({len(blocks) - len(set(blocks))} duplicates)",
         len(blocks) == len(set(blocks)),
     )
-    s.at_most(name, "resident lines", len(lines), c.num_blocks)
+    # A victim buffer holds lines beside the array, so it raises the bound.
+    victim = getattr(c, "victim", None)
+    capacity = c.num_blocks + (victim.entries if victim is not None else 0)
+    s.at_most(name, "resident lines", len(lines), capacity)
     # Lines parked in a victim buffer are reported with set index -1.
     misplaced = [
         block for set_idx, _, block, _ in lines if set_idx >= 0 and set_idx != c.set_of(block)

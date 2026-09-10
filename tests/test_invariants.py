@@ -284,6 +284,27 @@ class TestOptionalFeatureGuards(unittest.TestCase):
         self.assertEqual(report.skipped, ("timing identities (no accesses were simulated)",))
 
 
+class TestVictimBuffer(unittest.TestCase):
+    def test_a_victim_buffer_raises_the_residency_bound(self) -> None:
+        """Lines parked in the victim buffer are resident at the level, so a
+        level with a 4-entry buffer may hold num_blocks + 4 lines."""
+        spec = HierarchySpec(
+            levels=(
+                CacheSpec(
+                    "L1", size=1024, block_size=64, associativity=1, hit_time=3, victim_cache=4
+                ),
+                CacheSpec("L2", size=8192, block_size=64, associativity=8, hit_time=12),
+            ),
+            memory=ConstantMemorySpec(100),
+        )
+        h = simulated(spec)
+        l1 = h.levels[0].cache
+        self.assertGreater(sum(1 for _ in l1.lines()), l1.num_blocks)
+        report = check_hierarchy(h)
+        self.assertEqual(report.violations, ())
+        self.assertTrue(any("victim cache" in reason for reason in report.skipped))
+
+
 class TestRunCheckFlag(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
