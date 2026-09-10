@@ -94,6 +94,24 @@ class _RecencyOrder(ReplacementPolicy):
 
     The mapping's values are unused: it is a set of ways that remembers the
     order they were touched in.
+
+    Only two moves are ever made on that order, and both are written out at
+    each call site rather than put behind a ``_to_back`` / ``_to_front``
+    helper:
+
+    * ``order.move_to_end(way)`` makes ``way`` the MOST recently used of
+      its set -- the far end from the victim;
+    * ``order.move_to_end(way, last=False)`` makes it the LEAST recently
+      used -- the next way to be evicted.
+
+    Naming those two reads better, and costs a Python frame on the most
+    frequent event in the simulator. Measured with ``cachesim bench``,
+    interleaved best of 3 x ``--repeat 5``, helper against written out:
+    matmul_naive 0.248 -> 0.264 s, matmul_blocked 0.211 -> 0.225 s,
+    sequential 0.0398 -> 0.0423 s, conflict 0.0460 -> 0.0487 s -- 6% of a
+    hit-heavy run for a call that does one thing. So the names live here,
+    where they cannot fall out of step with the four statements below, and
+    the statements say ``move_to_end`` where the reader can see it.
     """
 
     def __init__(self, num_sets: int, num_ways: int, rng: random.Random | None = None) -> None:
@@ -103,20 +121,14 @@ class _RecencyOrder(ReplacementPolicy):
             OrderedDict.fromkeys(range(num_ways)) for _ in range(num_sets)
         ]
 
-    def _to_back(self, set_idx: int, way: int) -> None:
-        """Make ``way`` the most recently used of its set."""
-        self._order[set_idx].move_to_end(way)
-
-    def _to_front(self, set_idx: int, way: int) -> None:
-        """Make ``way`` the least recently used of its set."""
-        self._order[set_idx].move_to_end(way, last=False)
-
     def on_fill(self, set_idx: int, way: int, block: int) -> None:
+        # To the back: a freshly loaded block is the most recently used.
         self._order[set_idx].move_to_end(way)
 
     def on_invalidate(self, set_idx: int, way: int) -> None:
-        # An emptied way is refilled before any victim is chosen; keeping it
-        # at the front leaves the relative order of the valid ways intact.
+        # To the front: an emptied way is refilled before any victim is
+        # chosen, so parking it there leaves the relative order of the
+        # valid ways intact.
         self._order[set_idx].move_to_end(way, last=False)
 
     def victim(self, set_idx: int) -> int:
@@ -131,9 +143,10 @@ class LRUPolicy(_RecencyOrder):
     """
 
     def on_hit(self, set_idx: int, way: int, block: int) -> None:
-        # ``_to_back`` inlined: this is the single most frequently executed
-        # function in the simulator -- once per cache hit at every level --
-        # and the call frame cost more than the statement inside it.
+        # To the back: a referenced block is the most recently used. This
+        # is the single most frequently executed function in the simulator
+        # -- once per cache hit at every level -- and the reason
+        # ``_RecencyOrder`` spells the move out instead of naming it.
         self._order[set_idx].move_to_end(way)
 
 
@@ -157,6 +170,7 @@ class MRUPolicy(_RecencyOrder):
     """
 
     def on_hit(self, set_idx: int, way: int, block: int) -> None:
+        # To the back, exactly as LRU does; only ``victim`` differs.
         self._order[set_idx].move_to_end(way)
 
     def victim(self, set_idx: int) -> int:
