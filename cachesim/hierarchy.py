@@ -375,6 +375,7 @@ class Hierarchy:
         elif memory_access_time is not None:
             raise ValueError("give either memory_access_time or memory, not both")
         self.levels = levels
+        self._nlevels = len(levels)
         self.block_size = levels[0].cache.block_size
         self.memory = memory
         #: The fixed DRAM latency, or None if it depends on the address.
@@ -626,19 +627,41 @@ class Hierarchy:
         through ``_handle_eviction`` exactly as they do on the general path,
         so nothing about what happens to a line that leaves a level is
         restated here.
+
+        The first level is then peeled out of the probe loop, because a hit
+        there is what nearly every access is -- 94% of the accesses in
+        matmul_naive -- and it is the one outcome that fills nothing, writes
+        nothing back and reaches no level below. Peeling it means that
+        common access never builds the ``enumerate`` or the ``range`` the
+        loops would need. The peeled copy is the loop's first iteration
+        written out: it probes ``levels[0]`` with the access's own write
+        flag, exactly as iteration 0 did, and every later level is probed
+        with ``False`` because level 0 has by then taken the store.
         """
         block_size = self.block_size
         block = addr // block_size
         levels = self.levels
-        time = 0
-        hit_level = len(levels)
-        write = is_write  # true only until the first level takes the store
-        for i, level in enumerate(levels):
+        first = levels[0]
+        time = first.hit_time
+        if first.cache.probe(block, is_write):
+            # A hit in the first level: nothing to fetch, fill or evict.
+            if is_write:
+                self.writes += 1
+                self.write_cycles += time
+            else:
+                self.reads += 1
+                self.read_cycles += time
+            return time
+
+        nlevels = self._nlevels
+        hit_level = nlevels
+        for i in range(1, nlevels):
+            level = levels[i]
             time += level.hit_time
-            if level.cache.probe(block, write):
+            # Level 0 has taken the store, so below it this is a plain fill.
+            if level.cache.probe(block, False):
                 hit_level = i
                 break
-            write = False  # level 0 took it; below, this is an ordinary fill
         else:
             self.dram_reads += 1
             self.dram_bytes_read += block_size
