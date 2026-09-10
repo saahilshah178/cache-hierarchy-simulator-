@@ -1,4 +1,4 @@
-"""Trace file parsing.
+"""Reading and writing memory-access traces.
 
 Three input formats are understood. All of them are decoded to the same
 thing: a stream of ``(byte address, is_write)`` pairs. Access size is not
