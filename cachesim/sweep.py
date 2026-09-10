@@ -58,7 +58,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from cachesim.cache import Cache
-from cachesim.cliargs import load_trace, non_negative_int, parse_size, positive_int
+from cachesim.cliargs import load_trace_or_error, non_negative_int, parse_size, positive_int
 from cachesim.config import CacheSpec
 from cachesim.hierarchy import Hierarchy, Level
 from cachesim.plot import (
@@ -648,7 +648,7 @@ def _run_single(args: argparse.Namespace, parser: argparse.ArgumentParser, plot_
         if args.values
         else list(DEFAULT_VALUES[args.param])
     )
-    accesses = load_trace(parser, args.trace)
+    accesses = load_trace_or_error(parser, args.trace)
     print(f"trace: {args.trace} ({len(accesses):,} accesses)")
     base = _base_spec(args, args.size, args.assoc)
     try:
@@ -679,7 +679,7 @@ def _run_grid(args: argparse.Namespace, parser: argparse.ArgumentParser, plot_di
     sizes = [int(v) for v in _values_or_error(parser, "size", axis)]
     ways_axis = args.ways or ",".join(str(v) for v in ASSOCIATIVITIES)
     ways = [int(v) for v in _values_or_error(parser, "associativity", ways_axis)]
-    accesses = load_trace(parser, trace_path)
+    accesses = load_trace_or_error(parser, trace_path)
     print(f"trace: {trace_path} ({len(accesses):,} accesses)")
     base = _base_spec(args, args.size, args.assoc)
     grid = sweep_grid(accesses, base, sizes, ways, args.mem_time)
@@ -719,7 +719,7 @@ def _run_default(args: argparse.Namespace, parser: argparse.ArgumentParser, plot
                 f"({args.block_size}*{args.assoc}); pick a power-of-two associativity"
             )
 
-    assoc_accesses = load_trace(parser, assoc_path)
+    assoc_accesses = load_trace_or_error(parser, assoc_path)
     print(f"associativity sweep trace: {assoc_path} ({len(assoc_accesses):,} accesses)")
     assoc_base = _base_spec(args, args.size, args.assoc)
     assoc_rows = sweep(
@@ -727,7 +727,9 @@ def _run_default(args: argparse.Namespace, parser: argparse.ArgumentParser, plot
     )
     print_sweep(assoc_rows, assoc_base, "associativity")
 
-    size_accesses = assoc_accesses if size_path == assoc_path else load_trace(parser, size_path)
+    size_accesses = (
+        assoc_accesses if size_path == assoc_path else load_trace_or_error(parser, size_path)
+    )
     print(f"\nsize sweep trace: {size_path} ({len(size_accesses):,} accesses)")
     size_base = _base_spec(args, args.size, args.assoc)
     size_rows = sweep(size_accesses, size_base, "size", list(DEFAULT_VALUES["size"]), args.mem_time)

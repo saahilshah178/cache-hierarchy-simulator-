@@ -99,11 +99,16 @@ def read_trace(
     return result
 
 
-def load_trace(parser: argparse.ArgumentParser, path: str) -> list[tuple[int, bool]]:
+def load_trace_or_error(parser: argparse.ArgumentParser, path: str) -> list[tuple[int, bool]]:
     """The whole trace in memory as ``(address, is_write)`` pairs.
 
     Commands that replay a trace several times -- once per sweep point,
     once per configuration -- must hold it, because a generator can only be
     walked once and re-parsing the file per point would dominate the run.
+
+    Named for what distinguishes it from ``cachesim.trace.load_trace``,
+    which is the library function this one wraps: this one takes a parser
+    and turns a bad path into a usage error, so a reader moving between the
+    command modules and the simulator cannot mistake one call for the other.
     """
     return read_trace(parser, path, list)

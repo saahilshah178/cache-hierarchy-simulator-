@@ -58,7 +58,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from cachesim.cache import Cache
-from cachesim.cliargs import load_trace, non_negative_int, parse_size, positive_int
+from cachesim.cliargs import load_trace_or_error, non_negative_int, parse_size, positive_int
 from cachesim.plot import format_bytes
 from cachesim.policies import online_policy_names
 
@@ -399,7 +399,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     """Execute the ``sets`` command from parsed arguments."""
-    accesses = load_trace(parser, args.trace)
+    accesses = load_trace_or_error(parser, args.trace)
     try:
         hot = hot_sets(accesses, args.size, args.block_size, args.assoc, args.policy)
     except ValueError as exc:

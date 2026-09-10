@@ -17,7 +17,13 @@ import tempfile
 import unittest
 
 from cachesim import cliargs, compare, setpressure, stackdist, sweep
-from cachesim.cliargs import load_trace, non_negative_int, parse_size, positive_int, read_trace
+from cachesim.cliargs import (
+    load_trace_or_error,
+    non_negative_int,
+    parse_size,
+    positive_int,
+    read_trace,
+)
 from cachesim.stackdist import block_stream
 
 
@@ -80,13 +86,13 @@ class TestTraceLoading(unittest.TestCase):
         """Load ``path``, expecting exit status 2, and return what was printed."""
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:
-            load_trace(self.parser, path)
+            load_trace_or_error(self.parser, path)
         self.assertEqual(caught.exception.code, 2)
         return stderr.getvalue()
 
     def test_a_good_trace_comes_back_as_pairs(self) -> None:
         path = self.write("ok.trace", "0x40 R\n0x80 W\n# comment\n")
-        self.assertEqual(load_trace(self.parser, path), [(0x40, False), (0x80, True)])
+        self.assertEqual(load_trace_or_error(self.parser, path), [(0x40, False), (0x80, True)])
 
     def test_missing_file_points_at_gen_traces(self) -> None:
         message = self.error(os.path.join(self._tmp.name, "absent.trace"))
@@ -126,10 +132,13 @@ class TestCommandsShareTheHelpers(unittest.TestCase):
 
     def test_every_module_imports_rather_than_redefines(self) -> None:
         for module, names in (
-            (sweep, ("positive_int", "non_negative_int", "parse_size", "load_trace")),
+            (sweep, ("positive_int", "non_negative_int", "parse_size", "load_trace_or_error")),
             (stackdist, ("positive_int", "read_trace")),
-            (compare, ("non_negative_int", "load_trace")),
-            (setpressure, ("positive_int", "non_negative_int", "parse_size", "load_trace")),
+            (compare, ("non_negative_int", "load_trace_or_error")),
+            (
+                setpressure,
+                ("positive_int", "non_negative_int", "parse_size", "load_trace_or_error"),
+            ),
         ):
             for name in names:
                 with self.subTest(module=module.__name__, name=name):

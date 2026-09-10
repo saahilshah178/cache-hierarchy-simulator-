@@ -41,7 +41,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from cachesim.cliargs import load_trace, non_negative_int
+from cachesim.cliargs import load_trace_or_error, non_negative_int
 from cachesim.config import ConfigError, default_config, load_config, parse_config
 from cachesim.hierarchy import Hierarchy
 from cachesim.opt import simulate_with_opt, uses_opt
@@ -232,7 +232,7 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     except (OSError, json.JSONDecodeError, ConfigError) as exc:
         parser.error(f"cannot load config: {exc}")
 
-    accesses = load_trace(parser, args.trace)
+    accesses = load_trace_or_error(parser, args.trace)
     if args.warmup >= len(accesses):
         parser.error(
             f"--warmup {args.warmup} leaves nothing to measure "

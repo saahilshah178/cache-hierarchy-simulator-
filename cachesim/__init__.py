@@ -67,6 +67,7 @@ __all__ = [
     "default_config",
     "format_report",
     "load_config",
+    "load_trace",
     "make_prefetcher",
     "opt_misses",
     "parse_config",
@@ -75,6 +76,7 @@ __all__ = [
     "run_opt",
     "run_trace",
     "simulate_with_opt",
+    "uses_opt",
 ]
 
 
