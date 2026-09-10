@@ -27,19 +27,22 @@ Traffic flow (skipped when extra traffic is modelled)
     ``levels[i+1].accesses == levels[i].misses``,
     ``dram_reads == levels[-1].misses``, and
     ``fills == misses + writeback_allocations`` at every level. All four
-    assume demand fetching only into non-inclusive, non-exclusive levels:
-    a prefetcher fills without a miss, and an exclusive hierarchy fills a
-    level from the eviction above it rather than from its own miss. Both
-    are detected through optional attributes (``prefetcher`` on a level or
-    on the hierarchy, ``inclusion`` on the hierarchy) so that the check
-    steps aside instead of firing spuriously if such a feature is added.
+    assume demand fetching only into non-inclusive, non-exclusive,
+    write-back, write-allocate levels without prefetchers or victim
+    buffers: a prefetcher fills without a miss, an exclusive level is
+    filled from the eviction above it rather than from its own miss, a
+    no-write-allocate level declines write misses, and so on. Any such
+    feature on a level makes the check step aside with a reason instead
+    of firing spuriously.
 
-Write-back conservation (always)
+Write-back conservation (skipped when modified data takes another route)
     ``levels[i].writebacks_received == levels[i-1].writebacks`` and
     ``dram_writes == levels[-1].writebacks``. Dirty data is never
     duplicated and never dropped: every line written out of one level is
     accounted for by the level below it, and everything leaving the last
-    level reaches DRAM. Write-backs caused by ``flush()`` are included,
+    level reaches DRAM. Skipped when an inclusion, write, or victim-cache
+    policy routes modified data elsewhere. Write-backs caused by
+    ``flush()`` are included,
     because ``flush`` increments both sides. Calling ``Cache.invalidate``
     from outside the hierarchy breaks the identity, since the removed
     dirty line is counted as written back with nothing below to receive
@@ -54,8 +57,8 @@ Timing (skipped when the latency model is not constant)
     access time if it reached DRAM. A per-level transfer time (block size
     over bus width) or a non-constant DRAM model would add terms this sum
     does not have, so both checks are skipped when a level carries a
-    non-null ``bus_width`` or the hierarchy carries a non-null
-    ``dram_model``.
+    non-null ``bus_width``, when the memory model is not a constant
+    latency, or when any of the traffic-changing features above is on.
 
 Structure (always)
     A block has at most one copy in a cache, every valid line is found by
@@ -79,18 +82,15 @@ from typing import Any
 from cachesim.cache import Cache
 from cachesim.hierarchy import Hierarchy
 
-#: Attributes that, if present and not None, mean a level or the hierarchy
-#: charges time this module's constant-latency identity does not model.
-_TRANSFER_LEVEL_ATTRS = ("bus_width", "transfer_time")
-_TRANSFER_HIERARCHY_ATTRS = ("dram_model", "dram")
-
-#: Attributes that, if present and not None, mean traffic reaches a level
-#: other than through a demand miss of the level above it.
-_TRAFFIC_LEVEL_ATTRS = ("prefetcher",)
-_TRAFFIC_HIERARCHY_ATTRS = ("prefetcher",)
-
-#: Inclusion policies for which the traffic-flow identities still hold.
-_NINE_INCLUSION = (None, "nine", "non-inclusive")
+#: Level attributes whose non-default value changes how traffic or dirty
+#: data moves between levels, with the default that leaves the identities
+#: intact. Read with getattr so the checker degrades gracefully.
+_TRAFFIC_FEATURES: tuple[tuple[str, Any], ...] = (
+    ("inclusion", "nine"),
+    ("write_policy", "write-back"),
+    ("write_allocate", True),
+    ("prefetcher", None),
+)
 
 
 @dataclass(frozen=True)
@@ -107,41 +107,43 @@ class CheckReport:
         return not self.violations
 
 
-def _present(obj: object, names: tuple[str, ...]) -> str | None:
-    """The first of ``names`` that ``obj`` carries with a non-None value."""
-    for name in names:
-        if getattr(obj, name, None) is not None:
-            return name
-    return None
-
-
-def _transfer_time_modelled(h: Hierarchy) -> str | None:
-    """Why the constant-latency timing identity does not apply, if it does not."""
-    found = _present(h, _TRANSFER_HIERARCHY_ATTRS)
-    if found is not None:
-        return f"hierarchy.{found} is set"
+def _traffic_features(h: Hierarchy) -> list[str]:
+    """Reasons the demand-only traffic identities do not apply, if any."""
+    reasons = []
     for level in h.levels:
-        for obj, label in ((level, "level"), (level.cache, "cache")):
-            found = _present(obj, _TRANSFER_LEVEL_ATTRS)
-            if found is not None:
-                return f"{level.cache.name} {label}.{found} is set"
-    return None
+        name = level.cache.name
+        for attr, default in _TRAFFIC_FEATURES:
+            value = getattr(level, attr, default)
+            if value != default and value is not None:
+                if attr == "prefetcher":
+                    value = getattr(level, "prefetcher_name", type(value).__name__)
+                reasons.append(f"{name}: {attr} is {value!r}")
+        if getattr(level.cache, "victim", None) is not None:
+            reasons.append(f"{name}: victim cache is enabled")
+    return reasons
+
+
+def _transfer_features(h: Hierarchy) -> list[str]:
+    """Reasons the constant-latency timing identity does not apply, if any."""
+    reasons = []
+    if getattr(h, "memory_access_time", None) is None:
+        reasons.append("memory model is not a constant latency")
+    for level in h.levels:
+        if getattr(level, "bus_width", None) is not None:
+            reasons.append(f"{level.cache.name}: bus_width is set")
+    return reasons
 
 
 def _extra_traffic_modelled(h: Hierarchy) -> str | None:
     """Why the traffic-flow identities do not apply, if they do not."""
-    found = _present(h, _TRAFFIC_HIERARCHY_ATTRS)
-    if found is not None:
-        return f"hierarchy.{found} is set"
-    inclusion = getattr(h, "inclusion", None)
-    if inclusion not in _NINE_INCLUSION:
-        return f"hierarchy.inclusion is {inclusion!r}"
-    for level in h.levels:
-        for obj, label in ((level, "level"), (level.cache, "cache")):
-            found = _present(obj, _TRAFFIC_LEVEL_ATTRS)
-            if found is not None:
-                return f"{level.cache.name} {label}.{found} is set"
-    return None
+    reasons = _traffic_features(h)
+    return "; ".join(reasons) if reasons else None
+
+
+def _transfer_time_modelled(h: Hierarchy) -> str | None:
+    """Why the constant-latency timing identity does not apply, if it does not."""
+    reasons = _transfer_features(h) + _traffic_features(h)
+    return "; ".join(reasons) if reasons else None
 
 
 class _Sweep:
@@ -197,12 +199,12 @@ def check_hierarchy(hierarchy: Hierarchy, *, after_flush: bool = False) -> Check
             dirty = sum(1 for *_, is_dirty in level.cache.lines() if is_dirty)
             s.equal(level.cache.name, "dirty lines after a flush", dirty, 0)
 
-    _check_writeback_conservation(s, h)
-
     traffic_reason = _extra_traffic_modelled(h)
     if traffic_reason is None:
+        _check_writeback_conservation(s, h)
         _check_traffic_flow(s, h)
     else:
+        s.skip("write-back conservation", traffic_reason)
         s.skip("traffic-flow identities", traffic_reason)
 
     timing_reason = _transfer_time_modelled(h)
@@ -281,7 +283,10 @@ def _check_level_structure(s: _Sweep, c: Cache) -> None:
         len(blocks) == len(set(blocks)),
     )
     s.at_most(name, "resident lines", len(lines), c.num_blocks)
-    misplaced = [block for set_idx, _, block, _ in lines if set_idx != block % c.num_sets]
+    # Lines parked in a victim buffer are reported with set index -1.
+    misplaced = [
+        block for set_idx, _, block, _ in lines if set_idx >= 0 and set_idx != c.set_of(block)
+    ]
     s.truth(name, f"lines sit in the wrong set: {misplaced[:4]}", not misplaced)
     unfindable = [block for *_, block, _ in lines if not c.contains(block)]
     s.truth(name, f"valid lines not found by contains(): {unfindable[:4]}", not unfindable)
@@ -346,7 +351,9 @@ def _check_traffic_flow(s: _Sweep, h: Hierarchy) -> None:
 def _check_timing(s: _Sweep, h: Hierarchy) -> None:
     """Cycles are the probe charges plus the memory charges, and AMAT follows."""
     expected = sum(level.hit_time * level.cache.accesses for level in h.levels)
-    expected += h.memory_access_time * h.dram_reads
+    memory_access_time = h.memory_access_time
+    assert memory_access_time is not None  # callers skip non-constant models
+    expected += memory_access_time * h.dram_reads
     s.equal(
         "hierarchy",
         "total_cycles != sum(hit_time * accesses) + memory_access_time * dram_reads",

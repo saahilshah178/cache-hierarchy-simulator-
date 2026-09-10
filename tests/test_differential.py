@@ -28,10 +28,10 @@ import random
 import unittest
 from typing import Any
 
-from cachesim.cache import Cache
+from cachesim.cache import Cache, Evicted
 from cachesim.config import parse_config
 from cachesim.hierarchy import Hierarchy
-from cachesim.reference import RefCache, RefHierarchy
+from cachesim.reference import RefCache, RefEvicted, RefHierarchy
 
 Access = tuple[int, bool]
 Outcome = tuple[int, tuple[int, ...]]
@@ -179,6 +179,11 @@ STREAMS: dict[str, list[Access]] = {
     "cyclic_130_blocks": cyclic_stream(1600, 130, seed=6),
     "clustered": clustered_stream(1200, seed=7),
 }
+
+
+def removed_line(record: Evicted | RefEvicted | None) -> tuple[int, bool] | None:
+    """Project an eviction record onto the fields both models share."""
+    return None if record is None else (record.block, record.dirty)
 
 
 class DifferentialCase(unittest.TestCase):
@@ -344,20 +349,24 @@ class TestPrimitives(unittest.TestCase):
                 self.assertEqual(got, want, f"probe diverged at step {step}")
                 if not got:
                     self.assertEqual(
-                        real.allocate(block, dirty=is_write),
-                        ref.allocate(block, dirty=is_write),
+                        removed_line(real.allocate(block, dirty=is_write)),
+                        removed_line(ref.allocate(block, dirty=is_write)),
                         f"allocate diverged at step {step}",
                     )
             elif roll < 0.8:
                 dirty = rng.random() < 0.5
                 self.assertEqual(
-                    real.allocate(block, dirty=dirty),
-                    ref.allocate(block, dirty=dirty),
+                    removed_line(real.allocate(block, dirty=dirty)),
+                    removed_line(ref.allocate(block, dirty=dirty)),
                     f"allocate diverged at step {step}",
                 )
             else:
                 removed = real.invalidate(block)
-                self.assertEqual(removed, ref.invalidate(block), f"invalidate at step {step}")
+                self.assertEqual(
+                    removed_line(removed),
+                    removed_line(ref.invalidate(block)),
+                    f"invalidate at step {step}",
+                )
                 invalidations += removed is not None
             self.assertEqual(
                 sorted(real.lines()), sorted(ref.lines()), f"contents diverged at step {step}"

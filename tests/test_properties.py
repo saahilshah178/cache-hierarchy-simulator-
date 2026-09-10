@@ -48,7 +48,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without the extr
     ) from exc
 
 from cachesim.cache import Cache
-from cachesim.config import CacheSpec, HierarchySpec
+from cachesim.config import CacheSpec, ConstantMemorySpec, HierarchySpec
 from cachesim.hierarchy import Hierarchy
 
 Access = tuple[int, bool]
@@ -105,7 +105,7 @@ def hierarchy_specs(draw: st.DrawFn, max_levels: int = 3) -> HierarchySpec:
         )
     return HierarchySpec(
         levels=tuple(levels),
-        memory_access_time=draw(st.integers(min_value=0, max_value=200)),
+        memory=ConstantMemorySpec(draw(st.integers(min_value=0, max_value=200))),
     )
 
 
@@ -225,6 +225,7 @@ class TestCounterAlgebra(unittest.TestCase):
     ) -> None:
         h = run(spec, stream)
         expected = sum(lv.hit_time * lv.cache.accesses for lv in h.levels)
+        assert h.memory_access_time is not None
         expected += h.memory_access_time * h.dram_reads
         self.assertEqual(h.total_time, expected)
         if h.accesses:
@@ -247,7 +248,7 @@ class TestWriteBackConservation(unittest.TestCase):
             CacheSpec("L2", size=1024, block_size=64, associativity=1, hit_time=12),
             CacheSpec("L3", size=2048, block_size=64, associativity=2, hit_time=40),
         ),
-        memory_access_time=100,
+        memory=ConstantMemorySpec(100),
     )
 
     @EXAMPLES

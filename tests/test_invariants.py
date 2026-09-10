@@ -22,7 +22,7 @@ from typing import Any
 from cachesim import run_trace
 from cachesim.cache import EMPTY, Cache
 from cachesim.cli import main
-from cachesim.config import DEFAULT_CONFIG, CacheSpec, HierarchySpec
+from cachesim.config import DEFAULT_CONFIG, CacheSpec, ConstantMemorySpec, HierarchySpec
 from cachesim.hierarchy import Hierarchy, Level
 from cachesim.invariants import check_hierarchy, check_invariants
 from cachesim.workloads import Access, conflict_streams, matmul, sequential, write_trace
@@ -33,7 +33,7 @@ SMALL = HierarchySpec(
         CacheSpec("L2", size=2048, block_size=64, associativity=4, hit_time=12),
         CacheSpec("L3", size=8192, block_size=64, associativity=8, hit_time=40),
     ),
-    memory_access_time=100,
+    memory=ConstantMemorySpec(100),
 )
 
 
@@ -77,7 +77,7 @@ class TestCleanRuns(unittest.TestCase):
             with self.subTest(policy=policy):
                 spec = HierarchySpec(
                     levels=(CacheSpec("L1", 512, 64, 2, hit_time=4, policy=policy, rng_seed=3),),
-                    memory_access_time=50,
+                    memory=ConstantMemorySpec(50),
                 )
                 self.assertEqual(check_invariants(simulated(spec)), [])
 
@@ -136,7 +136,7 @@ class TestCorruptedCounters(unittest.TestCase):
 
     def test_a_wrong_cycle_count_is_detected(self) -> None:
         h = simulated()
-        h.total_time += 1
+        h.read_cycles += 1
         violations = check_invariants(h)
         self.assertEqual(len(violations), 2)  # the sum and the AMAT that follows from it
         self.assertIn("total_cycles !=", violations[0])
@@ -224,44 +224,58 @@ class TestOptionalFeatureGuards(unittest.TestCase):
 
     def test_a_bus_width_on_a_level_skips_the_timing_identities(self) -> None:
         h = simulated()
-        h.total_time += 1000  # would be a violation under the constant model
+        h.read_cycles += 1000  # would be a violation under the constant model
         self.assertTrue(check_invariants(h))
-        h.levels[1].bus_width = 32  # type: ignore[attr-defined]
+        h.levels[1].bus_width = 32
         report = check_hierarchy(h)
         self.assertTrue(report.ok, report.violations)
-        self.assertEqual(report.skipped, ("timing identities (L2 level.bus_width is set)",))
+        self.assertEqual(report.skipped, ("timing identities (L2: bus_width is set)",))
 
-    def test_a_dram_model_on_the_hierarchy_skips_the_timing_identities(self) -> None:
+    def test_a_non_constant_memory_model_skips_the_timing_identities(self) -> None:
         h = simulated()
-        h.total_time -= 7
+        h.read_cycles -= 7
         self.assertTrue(check_invariants(h))
-        h.dram_model = object()  # type: ignore[attr-defined]
+        h.memory_access_time = None  # what a row-buffer DRAM model reports
         report = check_hierarchy(h)
         self.assertTrue(report.ok, report.violations)
-        self.assertIn("hierarchy.dram_model is set", report.skipped[0])
+        self.assertEqual(
+            report.skipped, ("timing identities (memory model is not a constant latency)",)
+        )
 
     def test_a_prefetcher_skips_the_traffic_flow_identities(self) -> None:
         h = simulated()
         h.levels[1].cache.fills += 5  # a prefetcher would fill without a miss
         self.assertTrue(check_invariants(h))
-        h.levels[1].cache.prefetcher = object()  # type: ignore[attr-defined]
+        h.levels[1].prefetcher = object()  # type: ignore[assignment]
         report = check_hierarchy(h)
         self.assertTrue(report.ok, report.violations)
-        self.assertIn("prefetcher is set", report.skipped[0])
+        self.assertEqual(len(report.skipped), 3)  # conservation, traffic flow, timing
+        self.assertTrue(all("L2: prefetcher is" in reason for reason in report.skipped))
 
     def test_a_non_nine_inclusion_policy_skips_the_traffic_flow_identities(self) -> None:
         h = simulated()
         h.levels[2].cache.fills += 2  # an exclusive level fills on eviction
         self.assertTrue(check_invariants(h))
-        h.inclusion = "exclusive"  # type: ignore[attr-defined]
+        h.levels[2].inclusion = "exclusive"
         report = check_hierarchy(h)
         self.assertTrue(report.ok, report.violations)
-        self.assertIn("hierarchy.inclusion is 'exclusive'", report.skipped[0])
+        self.assertTrue(all("L3: inclusion is 'exclusive'" in r for r in report.skipped))
 
-    def test_a_null_optional_attribute_does_not_relax_anything(self) -> None:
+    def test_a_write_policy_skips_the_traffic_flow_identities(self) -> None:
         h = simulated()
-        h.levels[0].bus_width = None  # type: ignore[attr-defined]
-        h.inclusion = "nine"  # type: ignore[attr-defined]
+        h.levels[0].cache.fills += 1  # a no-write-allocate level declines a fill
+        self.assertTrue(check_invariants(h))
+        h.levels[0].write_allocate = False
+        report = check_hierarchy(h)
+        self.assertTrue(report.ok, report.violations)
+        self.assertTrue(all("L1: write_allocate is False" in r for r in report.skipped))
+
+    def test_default_feature_values_do_not_relax_anything(self) -> None:
+        h = simulated()
+        h.levels[0].bus_width = None
+        h.levels[0].inclusion = "nine"
+        h.levels[0].write_policy = "write-back"
+        h.levels[0].write_allocate = True
         self.assertEqual(check_hierarchy(h).skipped, ())
 
     def test_a_run_with_no_accesses_skips_the_timing_identities(self) -> None:
@@ -314,7 +328,7 @@ class TestRunCheckFlag(unittest.TestCase):
 
         def corrupting(*args: Any, **kwargs: Any) -> Hierarchy:
             hierarchy = run_trace(*args, **kwargs)
-            hierarchy.total_time += 13
+            hierarchy.read_cycles += 13
             hierarchy.levels[0].cache.hits += 1
             return hierarchy
 

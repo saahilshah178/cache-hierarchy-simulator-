@@ -411,7 +411,10 @@ class RefHierarchy:
             )
             for level in spec.levels
         ]
-        return cls(levels, spec.memory_access_time)
+        memory_access_time = spec.memory_access_time
+        if memory_access_time is None:
+            raise ValueError("the reference model supports a constant memory latency only")
+        return cls(levels, memory_access_time)
 
     def access(self, addr: int, is_write: bool = False) -> int:
         """Simulate one access; returns the cycles it took.

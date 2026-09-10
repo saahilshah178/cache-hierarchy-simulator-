@@ -115,7 +115,8 @@ class TestCacheIndexing(unittest.TestCase):
         self.assertFalse(c.is_dirty(43))
         self.assertTrue(c.mark_dirty(43))
         removed = c.invalidate(43)
-        self.assertEqual(removed, (43, True))
+        assert removed is not None
+        self.assertEqual((removed.block, removed.dirty), (43, True))
         self.assertFalse(c.contains(43))
         self.assertTrue(c.access(43 * 16) is False)  # gone: misses again
 
