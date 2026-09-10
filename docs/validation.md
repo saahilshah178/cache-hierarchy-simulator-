@@ -855,7 +855,8 @@ cycles == 4 x accesses + 12 x l1_misses + 40 x l2_misses + 100 x dram_reads
 ```
 
 The module regenerates the traces into a temporary directory, which takes a few seconds, so
-it honours `CACHESIM_SKIP_SLOW` (any value but `0` or empty skips it). It runs by default.
+it honours `CACHESIM_SKIP_SLOW` (any value but `0` or empty skips it, along with the
+block-size table in `tests/test_timing.py`). It runs by default.
 
 ## Stack-distance cross-check
 
@@ -908,25 +909,24 @@ python -m pytest --co -q | tail -1
 tests/test_write_policy.py: 18
 ```
 
-The project sets `addopts = "-q"` in `pyproject.toml`, so `--co -q` prints a per-module
-count rather than a total. The total is available by overriding the option:
+The total:
 
 ```bash
-python -m pytest --co -q -o addopts="" | tail -1
+python -m pytest --co -q | tail -1
 ```
 
 ```text
-666 tests collected in 0.22s
+680 tests collected in 0.24s
 ```
 
 The whole suite:
 
 ```bash
-python -m pytest
+python -m pytest -q
 ```
 
 ```text
-666 passed, 635 subtests passed in 14.82s
+680 passed, 685 subtests passed in 14.51s
 ```
 
 The golden module regenerates the sample traces into a temporary directory, which is the

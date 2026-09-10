@@ -167,8 +167,8 @@ TRACE STATISTICS  (traces/matmul_naive.trace)
 `min_address`, `max_address`, `first_touches` and `compulsory_fraction`. The two
 address bounds are `null` for an empty trace.
 
-An unreadable or malformed trace, a trace with no accesses, and a non-positive
-`--block-size` all print `error: ...` and exit 1.
+An unreadable or malformed trace and a trace with no accesses print `error: ...` and
+exit 1; a non-positive `--block-size` is a usage error and exits 2.
 
 ## sweep
 
@@ -591,8 +591,10 @@ given, `config` `null` for the built-in hierarchy), `accesses`, `repeat`,
 `parse_seconds`, `best_seconds`, `median_seconds`, `accesses_per_second` (`accesses /
 best_seconds`), and `seconds`, every repetition's wall-clock time in order.
 
-A `--repeat` below 1 and an unreadable, malformed or empty trace print `error: ...` and
-exit 1; an invalid `--config` fails the same way as [`run`](#run).
+An unreadable, malformed or empty trace prints `error: ...` and exits 1, and so does a
+configuration with an `opt` level, since a two-pass OPT run is not the quantity `bench`
+measures; a `--repeat` below 1 is a usage error and exits 2; an invalid `--config` fails
+the same way as [`run`](#run).
 
 ## JSON output
 
@@ -699,9 +701,10 @@ is bumped whenever a field is renamed or its meaning changes, and is currently `
 
 ## Environment variables
 
-`CACHESIM_SKIP_SLOW` controls the golden regression suite in `tests/test_golden.py`,
-which regenerates all six sample traces, checks their SHA-256 digests and simulates
-each one. Any value other than empty or `0` skips it:
+`CACHESIM_SKIP_SLOW` controls the slow tests: the golden regression suite in
+`tests/test_golden.py`, which regenerates all six sample traces, checks their SHA-256
+digests and simulates each one, and the block-size table in `tests/test_timing.py`.
+Any value other than empty or `0` skips them:
 
 ```bash
 CACHESIM_SKIP_SLOW=1 python -m pytest

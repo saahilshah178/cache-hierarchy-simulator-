@@ -327,7 +327,7 @@ included: [docs/model.md](docs/model.md).
 
 ## Validation
 
-666 tests (`pytest --co -q -o addopts=""`) establish correctness from six directions.
+680 tests (`pytest --co -q`) establish correctness from six directions.
 
 - **Differential testing.** `cachesim.reference` is a second implementation written from the
   documented semantics, sharing no algorithmic code with the model. Both are driven with the
