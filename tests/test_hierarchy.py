@@ -361,3 +361,47 @@ class TestWarmup(unittest.TestCase):
             self.assertEqual(cold.levels[0].cache.misses, 64)
             self.assertEqual(warm.levels[0].cache.misses, 0)
             self.assertEqual(warm.levels[0].cache.compulsory_misses, 0)
+
+
+class TestPackageSurface(unittest.TestCase):
+    """``cachesim`` re-exports the types a caller builds a model out of, so
+    the memory models, prefetchers and their specs have to be reachable
+    from the package root and not only from their own modules."""
+
+    def test_the_modelling_types_are_importable_from_the_package_root(self) -> None:
+        import cachesim
+
+        for name in (
+            "INCLUSION_POLICIES",
+            "WRITE_POLICIES",
+            "PREFETCHERS",
+            "PREFETCHER_NAMES",
+            "make_prefetcher",
+            "Prefetcher",
+            "MemoryModel",
+            "ConstantMemory",
+            "RowBufferMemory",
+            "ConstantMemorySpec",
+            "RowBufferMemorySpec",
+            "MemorySpec",
+            "MemoryStats",
+            "VictimBuffer",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(name, cachesim.__all__)
+                self.assertTrue(hasattr(cachesim, name))
+
+    def test_a_reexport_is_the_object_its_module_defines(self) -> None:
+        import cachesim
+        import cachesim.dram
+        import cachesim.prefetch
+
+        self.assertIs(cachesim.RowBufferMemory, cachesim.dram.RowBufferMemory)
+        self.assertIs(cachesim.PREFETCHERS, cachesim.prefetch.PREFETCHERS)
+        self.assertIs(cachesim.VictimBuffer, VictimBuffer)
+
+    def test_every_exported_name_resolves_and_is_listed_once(self) -> None:
+        import cachesim
+
+        self.assertEqual([n for n in cachesim.__all__ if not hasattr(cachesim, n)], [])
+        self.assertEqual(len(set(cachesim.__all__)), len(cachesim.__all__))
