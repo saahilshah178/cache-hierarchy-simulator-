@@ -386,6 +386,86 @@ class TestDRRIP(unittest.TestCase):
         self.assertEqual(drrip, srrip)
 
 
+class _ListOrder:
+    """The recency order as a list of ways, victim at the front.
+
+    This is what ``_RecencyOrder`` kept before it moved to an OrderedDict,
+    transcribed here so the replacement can be checked against it rather
+    than against a description of it.
+    """
+
+    def __init__(self, num_sets: int, num_ways: int) -> None:
+        self.order = [list(range(num_ways)) for _ in range(num_sets)]
+
+    def to_back(self, set_idx: int, way: int) -> None:
+        order = self.order[set_idx]
+        order.remove(way)
+        order.append(way)
+
+    def to_front(self, set_idx: int, way: int) -> None:
+        order = self.order[set_idx]
+        order.remove(way)
+        order.insert(0, way)
+
+    def lru(self, set_idx: int) -> int:
+        return self.order[set_idx][0]
+
+    def mru(self, set_idx: int) -> int:
+        return self.order[set_idx][-1]
+
+
+class TestRecencyOrder(unittest.TestCase):
+    """The OrderedDict must order the ways exactly as the old list did.
+
+    The reference model and the differential tests pin exact victims, so
+    the two representations have to agree on every set, after every mix of
+    hits, fills and invalidations -- invalidations included, because those
+    are what move a way to the *front* and are the only event that could
+    have made the two orders diverge.
+    """
+
+    def _drive(self, policy_name: str, num_sets: int, num_ways: int, seed: int) -> None:
+        rng = random.Random(seed)
+        policy = POLICIES[policy_name](num_sets, num_ways, random.Random(0))
+        reference = _ListOrder(num_sets, num_ways)
+        hits_go_back = policy_name in ("lru", "mru")
+        for _ in range(4000):
+            set_idx = rng.randrange(num_sets)
+            way = rng.randrange(num_ways)
+            event = rng.choice(("hit", "fill", "invalidate"))
+            if event == "hit":
+                policy.on_hit(set_idx, way, 0)
+                if hits_go_back:
+                    reference.to_back(set_idx, way)
+            elif event == "fill":
+                policy.on_fill(set_idx, way, 0)
+                reference.to_back(set_idx, way)
+            else:
+                policy.on_invalidate(set_idx, way)
+                reference.to_front(set_idx, way)
+            expected = reference.mru(set_idx) if policy_name == "mru" else reference.lru(set_idx)
+            self.assertEqual(policy.victim(set_idx), expected)
+
+    def test_lru_matches_the_list_order(self) -> None:
+        self._drive("lru", num_sets=4, num_ways=4, seed=1)
+
+    def test_fifo_matches_the_list_order(self) -> None:
+        self._drive("fifo", num_sets=4, num_ways=4, seed=2)
+
+    def test_mru_matches_the_list_order(self) -> None:
+        self._drive("mru", num_sets=4, num_ways=4, seed=3)
+
+    def test_a_wide_set_matches_the_list_order(self) -> None:
+        self._drive("lru", num_sets=2, num_ways=16, seed=4)
+
+    def test_untouched_set_evicts_way_zero(self) -> None:
+        # A cold set is ordered [0, 1, ..., ways-1], as the list was.
+        for name in ("lru", "fifo", "mru"):
+            with self.subTest(policy=name):
+                policy = POLICIES[name](2, 4, random.Random(0))
+                self.assertEqual(policy.victim(0), 0 if name != "mru" else 3)
+
+
 class TestEveryPolicy(unittest.TestCase):
     """Invariants that every online entry in the registry must satisfy.
 

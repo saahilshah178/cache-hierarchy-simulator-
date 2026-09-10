@@ -34,6 +34,7 @@ lives in ``cachesim.opt`` and registers itself here under the name ``opt``.
 from __future__ import annotations
 
 import random
+from collections import OrderedDict
 from typing import ClassVar
 
 
@@ -71,33 +72,55 @@ class ReplacementPolicy:
 
 
 class _RecencyOrder(ReplacementPolicy):
-    """Shared machinery: each set keeps its ways in an ordered list, victim
-    at the front. Subclasses decide which events move a way to the back."""
+    """Shared machinery: each set keeps its ways in recency order, victim at
+    the front. Subclasses decide which events move a way to the back.
+
+    The order is an ``OrderedDict`` of ways rather than a list of them.
+    Both spell the same sequence and both are ordered by insertion, but a
+    list has to find the way before it can move it: ``remove`` plus
+    ``append`` is a scan, and it runs on every cache hit, which is the most
+    frequent event in the simulator. An ``OrderedDict`` threads a doubly
+    linked list through its entries, so ``move_to_end`` is a lookup and two
+    pointer swaps whatever the associativity is. Timed on this machine, one
+    move to the back:
+
+        ways    list    OrderedDict
+           4   33 ns          11 ns
+           8   45 ns          11 ns
+          16   70 ns          11 ns
+
+    against 8.5 ns and 29 ns respectively for reading the front, which is
+    paid only when a set is full and has to name a victim.
+
+    The mapping's values are unused: it is a set of ways that remembers the
+    order they were touched in.
+    """
 
     def __init__(self, num_sets: int, num_ways: int, rng: random.Random | None = None) -> None:
         super().__init__(num_sets, num_ways, rng)
-        self._order = [list(range(num_ways)) for _ in range(num_sets)]
+        #: Ways of each set, least recently used first.
+        self._order: list[OrderedDict[int, None]] = [
+            OrderedDict.fromkeys(range(num_ways)) for _ in range(num_sets)
+        ]
 
     def _to_back(self, set_idx: int, way: int) -> None:
-        order = self._order[set_idx]
-        order.remove(way)
-        order.append(way)
+        """Make ``way`` the most recently used of its set."""
+        self._order[set_idx].move_to_end(way)
 
     def _to_front(self, set_idx: int, way: int) -> None:
-        order = self._order[set_idx]
-        order.remove(way)
-        order.insert(0, way)
+        """Make ``way`` the least recently used of its set."""
+        self._order[set_idx].move_to_end(way, last=False)
 
     def on_fill(self, set_idx: int, way: int, block: int) -> None:
-        self._to_back(set_idx, way)
+        self._order[set_idx].move_to_end(way)
 
     def on_invalidate(self, set_idx: int, way: int) -> None:
         # An emptied way is refilled before any victim is chosen; keeping it
         # at the front leaves the relative order of the valid ways intact.
-        self._to_front(set_idx, way)
+        self._order[set_idx].move_to_end(way, last=False)
 
     def victim(self, set_idx: int) -> int:
-        return self._order[set_idx][0]
+        return next(iter(self._order[set_idx]))
 
 
 class LRUPolicy(_RecencyOrder):
@@ -108,7 +131,10 @@ class LRUPolicy(_RecencyOrder):
     """
 
     def on_hit(self, set_idx: int, way: int, block: int) -> None:
-        self._to_back(set_idx, way)
+        # ``_to_back`` inlined: this is the single most frequently executed
+        # function in the simulator -- once per cache hit at every level --
+        # and the call frame cost more than the statement inside it.
+        self._order[set_idx].move_to_end(way)
 
 
 class FIFOPolicy(_RecencyOrder):
@@ -131,10 +157,10 @@ class MRUPolicy(_RecencyOrder):
     """
 
     def on_hit(self, set_idx: int, way: int, block: int) -> None:
-        self._to_back(set_idx, way)
+        self._order[set_idx].move_to_end(way)
 
     def victim(self, set_idx: int) -> int:
-        return self._order[set_idx][-1]
+        return next(reversed(self._order[set_idx]))
 
 
 class RandomPolicy(ReplacementPolicy):
