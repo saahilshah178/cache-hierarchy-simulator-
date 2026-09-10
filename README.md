@@ -38,6 +38,8 @@ Analysis
 - `cachesim compare` — one trace through several configurations, tabulated with deltas.
 - `cachesim sets` — cumulative hot-set histogram and windowed set oversubscription.
 - `cachesim trace-stats` — footprint, distinct blocks and pages, compulsory-miss floor.
+- `cachesim bench` — wall-clock throughput of the simulator itself, best of N timed
+  passes, as text or JSON.
 
 Verification
 
@@ -60,7 +62,7 @@ pip install -e ".[dev]"       # adds pytest, hypothesis, ruff, mypy, matplotlib
 
 ## Quick start
 
-Generate the sample traces (about 20 MB; they are not checked in) and simulate one:
+Generate the sample traces (about 17 MB; they are not checked in) and simulate one:
 
 ```bash
 cachesim gen-traces --out-dir traces
@@ -118,6 +120,10 @@ cachesim sets traces/matmul_naive.trace --window 512
 cachesim trace-stats traces/matmul_naive.trace
 cachesim bench traces/matmul_naive.trace
 ```
+
+`bench --repeat 5` on `matmul_naive.trace` measured 2,004,954 accesses/s (499 ns/access,
+best of 5) on the development machine; throughput depends on the machine and interpreter,
+not on the simulated hierarchy.
 
 Full option reference: [docs/cli.md](docs/cli.md).
 
@@ -321,7 +327,7 @@ included: [docs/model.md](docs/model.md).
 
 ## Validation
 
-627 tests (`pytest --co -q -o addopts=""`) establish correctness from six directions.
+666 tests (`pytest --co -q -o addopts=""`) establish correctness from six directions.
 
 - **Differential testing.** `cachesim.reference` is a second implementation written from the
   documented semantics, sharing no algorithmic code with the model. Both are driven with the
@@ -356,8 +362,9 @@ make check       # lint + typecheck + test
 make traces      # cachesim gen-traces --out-dir traces
 ```
 
-CI runs the test suite on CPython 3.10, 3.11, 3.12, 3.13 and 3.14, then smoke-tests every
-subcommand and the invariant checker on freshly generated traces. A separate job runs
+CI runs the test suite on CPython 3.10, 3.11, 3.12, 3.13 and 3.14, then smoke-tests `run`,
+`trace-stats`, `sweep`, `policies`, `mrc`, `compare`, `sets` and the invariant checker on
+freshly generated traces. A separate job runs
 `ruff check`, `ruff format --check` and `mypy` under `strict = true` with
 `warn_unreachable`, over both `cachesim` and `tests`.
 
@@ -365,6 +372,8 @@ subcommand and the invariant checker on freshly generated traces. A separate job
 
 - Belady, L. A., "A study of replacement algorithms for a virtual-storage computer", IBM
   Systems Journal 5(2), 1966.
+- Belady, L. A., Nelson, R. A., Shedler, G. S., "An anomaly in space-time characteristics
+  of certain programs running in a paging machine", Communications of the ACM 12(6), 1969.
 - Mattson, R. L., Gecsei, J., Slutz, D. R., Traiger, I. L., "Evaluation techniques for
   storage hierarchies", IBM Systems Journal 9(2), 1970.
 - Smith, A. J., "Cache Memories", ACM Computing Surveys 14(3), 1982.
