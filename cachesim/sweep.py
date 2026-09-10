@@ -230,7 +230,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--block-size", type=_positive_int, default=64, help="block size in bytes (default 64)"
     )
     parser.add_argument(
-        "--policy", default="lru", choices=sorted(POLICIES), help="replacement policy (default lru)"
+        "--policy",
+        default="lru",
+        # Offline policies need the whole reference stream of the level up
+        # front, which a sweep cannot supply: use the `policies` command.
+        choices=sorted(name for name, cls in POLICIES.items() if not cls.sees_references),
+        help="replacement policy (default lru; for the offline optimum see `cachesim policies`)",
     )
     parser.add_argument(
         "--hit-time", type=_non_negative_int, default=4, help="cache hit time in cycles (default 4)"
