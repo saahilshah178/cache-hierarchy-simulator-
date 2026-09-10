@@ -7,6 +7,12 @@ per-set bookkeeping and is driven by hooks that ``Cache`` calls:
 * ``on_fill(set_idx, way, block)`` -- ``block`` was installed into this way.
 * ``on_invalidate(set_idx, way)``  -- the way was emptied on command.
 * ``victim(set_idx)``              -- the set is full; return the way to evict.
+* ``on_probe(set_idx, block)``     -- a lookup started, hit or miss unknown.
+  Only called for policies that set ``sees_references``, so nothing is paid
+  for it on the hot path otherwise. It is the hook a policy needs to count
+  *references* to the level: a probe is one reference, whereas ``on_fill``
+  also fires for a write-back arriving from the level above, which is not a
+  lookup.
 
 ``victim`` is only called when every way of the set holds valid data: empty
 ways (including ways emptied by ``on_invalidate``) are always filled first,
@@ -20,20 +26,35 @@ Two families live here:
   ``lru``, ``fifo``, ``plru`` (tree pseudo-LRU), ``nru``, ``lfu``, and the
   re-reference interval predictors ``srrip``, ``brrip`` and ``drrip``;
 * deliberate contrasts used to bound behaviour -- ``random`` and ``mru``.
+
+Belady's optimal policy is offline -- it has to be told the future -- so it
+lives in ``cachesim.opt`` and registers itself here under the name ``opt``.
 """
 
 from __future__ import annotations
 
 import random
+from typing import ClassVar
 
 
 class ReplacementPolicy:
     """Base class. Tracks nothing; subclasses add per-set state."""
 
+    #: Set by a policy that has to observe every lookup, not just its
+    #: outcome; ``Cache`` then calls ``on_probe``. False for every online
+    #: policy, so they cost nothing.
+    sees_references: ClassVar[bool] = False
+
     def __init__(self, num_sets: int, num_ways: int, rng: random.Random | None = None) -> None:
         self.num_sets = num_sets
         self.num_ways = num_ways
         self.rng = rng if rng is not None else random.Random(0)
+
+    def on_probe(self, set_idx: int, block: int) -> None:
+        """Called at the start of a lookup, before hit or miss is decided.
+
+        Only called when ``sees_references`` is set.
+        """
 
     def on_hit(self, set_idx: int, way: int, block: int) -> None:
         """Called every time an access hits ``way`` in ``set_idx``."""

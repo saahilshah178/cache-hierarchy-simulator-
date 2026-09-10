@@ -14,6 +14,10 @@ from cachesim.config import (
 )
 from cachesim.hierarchy import Hierarchy, Level
 from cachesim.invariants import CheckReport, check_hierarchy, check_invariants
+
+# Importing cachesim.opt registers the offline "opt" policy in POLICIES, so
+# that a config or a --policy flag can name it wherever the package is used.
+from cachesim.opt import OPTPolicy, opt_misses, run_opt, simulate_with_opt
 from cachesim.policies import POLICIES, ReplacementPolicy
 from cachesim.report import build_report, format_report, print_report
 from cachesim.stats import HierarchyStats, LevelStats, ThreeCStats
@@ -33,6 +37,7 @@ __all__ = [
     "HierarchyStats",
     "Level",
     "LevelStats",
+    "OPTPolicy",
     "ReplacementPolicy",
     "ThreeCStats",
     "__version__",
@@ -42,10 +47,13 @@ __all__ = [
     "default_config",
     "format_report",
     "load_config",
+    "opt_misses",
     "parse_config",
     "parse_trace",
     "print_report",
+    "run_opt",
     "run_trace",
+    "simulate_with_opt",
 ]
 
 

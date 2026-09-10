@@ -63,7 +63,7 @@ from __future__ import annotations
 
 import random
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import NamedTuple
 
 from cachesim.indexing import DEFAULT_INDEX, INDEX_FUNCTIONS, IndexFunction, make_index
@@ -174,6 +174,12 @@ class Cache:
             # e.g. plru rejecting a non-power-of-two associativity: name the
             # level so the message identifies which one is misconfigured.
             raise ValueError(f"{name}: {exc}") from None
+        # Offline policies (OPT) have to see every lookup, not just its
+        # outcome. Bind the hook once here so that probe() pays a single
+        # ``is None`` test rather than an attribute lookup and a call.
+        self._on_probe: Callable[[int, int], None] | None = (
+            self.policy.on_probe if self.policy.sees_references else None
+        )
 
         # Cache contents, indexed [set][way]: the block number held in each
         # way (EMPTY for an invalid way) and its dirty bit.
@@ -237,6 +243,9 @@ class Cache:
         """
         index = self._index_fn
         set_idx = block % self.num_sets if index is None else index(block)
+        on_probe = self._on_probe
+        if on_probe is not None:
+            on_probe(set_idx, block)
         blocks = self._blocks[set_idx]
         # At most ``ways`` comparisons, like the parallel tag comparators of
         # real hardware.

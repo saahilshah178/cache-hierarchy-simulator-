@@ -210,6 +210,14 @@ def parse_config(config: Mapping[str, Any]) -> HierarchySpec:
     names = [level.name for level in levels]
     if len(set(names)) != len(names):
         raise ConfigError(f"level names must be unique, got {names}")
+    offline = [level.name for level in levels if level.policy == "opt"]
+    if len(offline) > 1:
+        # OPT at one level changes what the level below it sees, so the
+        # reference stream a second OPT level needs cannot be recorded in
+        # advance; see cachesim.opt.simulate_with_opt.
+        raise ConfigError(
+            f"policy 'opt' is only meaningful at one level, but {', '.join(offline)} all ask for it"
+        )
     block_sizes = {level.block_size for level in levels}
     if len(block_sizes) != 1:
         raise ConfigError(

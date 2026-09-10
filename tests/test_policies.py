@@ -387,9 +387,13 @@ class TestDRRIP(unittest.TestCase):
 
 
 class TestEveryPolicy(unittest.TestCase):
-    """Invariants that every entry in the registry must satisfy."""
+    """Invariants that every online entry in the registry must satisfy.
 
-    names = sorted(POLICIES)
+    Offline policies (``opt``) have to be told the future before they can
+    run at all and are exercised in tests/test_opt.py instead.
+    """
+
+    names = sorted(name for name, cls in POLICIES.items() if not cls.sees_references)
 
     def test_an_invalidated_way_is_refilled_before_any_eviction(self) -> None:
         # Emptying a way must leave the policy consistent: the next fill
