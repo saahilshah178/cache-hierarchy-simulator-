@@ -360,7 +360,11 @@ def format_window_pressure(pressure: WindowPressure) -> str:
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Add the ``sets`` options to ``parser``."""
-    parser.add_argument("trace", help="trace file (one 'ADDR R|W' per line)")
+    parser.add_argument(
+        "trace",
+        help="trace file: native 'ADDR R|W', Dinero IV .din, or Valgrind Lackey "
+        ".lackey/.vg, chosen by extension; a .gz suffix is decompressed first",
+    )
     parser.add_argument(
         "--size", type=parse_size, default=32 * 1024, help="cache size (default 32k)"
     )

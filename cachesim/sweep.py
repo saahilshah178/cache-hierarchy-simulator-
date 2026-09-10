@@ -521,7 +521,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "trace",
         nargs="?",
         default=None,
-        help="trace file (default: conflict.trace for the associativity sweep, "
+        help="trace file: native 'ADDR R|W', Dinero IV .din, or Valgrind Lackey "
+        ".lackey/.vg, chosen by extension; a .gz suffix is decompressed first "
+        "(default: conflict.trace for the associativity sweep, "
         "matmul_naive.trace for the size sweep)",
     )
     parser.add_argument(
