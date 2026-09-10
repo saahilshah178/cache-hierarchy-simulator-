@@ -1,4 +1,4 @@
-"""Tests for trace parsing."""
+"""Tests for trace reading and writing, and for the trace-stats command."""
 
 from __future__ import annotations
 
@@ -13,7 +13,10 @@ from typing import ClassVar
 
 from cachesim import run_trace
 from cachesim.cli import main
+from cachesim.config import DEFAULT_CONFIG
+from cachesim.hierarchy import Hierarchy
 from cachesim.trace import detect_format, load_trace, open_trace, parse_trace, write_trace
+from cachesim.tracecmd import TraceStats, analyse_trace
 from cachesim.workloads import sequential
 
 
@@ -299,6 +302,105 @@ class TestSimulatingForeignFormats(TraceFileCase):
     def test_cli_rejects_an_unknown_trace_format(self) -> None:
         with self.assertRaises(SystemExit):
             main(["run", "--trace-format", "pin", self.path("t.trace")])
+
+
+class TestTraceStats(TraceFileCase):
+    """`cachesim trace-stats`: properties of the address stream alone."""
+
+    def stats_of(self, name: str, text: str, **kwargs: int) -> TraceStats:
+        return analyse_trace(parse_trace(self.write(name, text)), **kwargs)
+
+    def test_hand_checkable_trace(self) -> None:
+        # Blocks 0 (twice, plus 0x08), 1 (0x40) and 64 (0x1000); pages 0 and 1.
+        stats = self.stats_of("t.trace", "0x00 R\n0x08 W\n0x40 R\n0x1000 R\n0x00 R\n")
+        self.assertEqual(stats.accesses, 5)
+        self.assertEqual((stats.reads, stats.writes), (4, 1))
+        self.assertEqual(stats.distinct_blocks, 3)
+        self.assertEqual(stats.footprint_bytes, 192)
+        self.assertEqual(stats.distinct_pages, 2)
+        self.assertEqual((stats.min_address, stats.max_address), (0x00, 0x1000))
+        self.assertEqual(stats.first_touches, 3)
+        self.assertEqual(stats.compulsory_fraction, 0.6)
+
+    def test_generated_trace(self) -> None:
+        # 8 KB scanned twice by 8-byte words: 1024 words per pass, every
+        # tenth access a write, 8192/64 = 128 blocks over two 4 KB pages.
+        accesses = [(addr, op == "W") for addr, op in sequential(buffer_bytes=8 * 1024, passes=2)]
+        stats = analyse_trace(accesses)
+        self.assertEqual(stats.accesses, 2048)
+        self.assertEqual((stats.reads, stats.writes), (1844, 204))
+        self.assertEqual(stats.distinct_blocks, 128)
+        self.assertEqual(stats.footprint_bytes, 8192)
+        self.assertEqual(stats.distinct_pages, 2)
+        self.assertEqual((stats.min_address, stats.max_address), (0x0010_0000, 0x0010_0000 + 8184))
+        self.assertEqual(stats.compulsory_fraction, 0.0625)
+
+    def test_block_size_changes_the_footprint_and_the_floor(self) -> None:
+        accesses = [(addr, op == "W") for addr, op in sequential(buffer_bytes=8 * 1024, passes=2)]
+        stats = analyse_trace(accesses, block_size=8)
+        self.assertEqual(stats.distinct_blocks, 1024)  # one per word now
+        self.assertEqual(stats.footprint_bytes, 8192)  # the same bytes, finer blocks
+        self.assertEqual(stats.compulsory_fraction, 0.5)
+
+    def test_first_touches_are_the_hierarchy_dram_reads(self) -> None:
+        # A cold hierarchy that holds the whole footprint fetches exactly the
+        # distinct blocks from DRAM: the compulsory floor is not just a bound.
+        accesses = [(addr, op == "W") for addr, op in sequential(buffer_bytes=8 * 1024, passes=2)]
+        hierarchy = Hierarchy.from_config(DEFAULT_CONFIG)
+        for addr, is_write in accesses:
+            hierarchy.access(addr, is_write)
+        self.assertEqual(hierarchy.dram_reads, analyse_trace(accesses).distinct_blocks)
+
+    def test_empty_trace_reports_no_address_range(self) -> None:
+        stats = self.stats_of("t.trace", "# nothing here\n")
+        self.assertEqual(stats.accesses, 0)
+        self.assertIsNone(stats.min_address)
+        self.assertIsNone(stats.max_address)
+        self.assertEqual(stats.compulsory_fraction, 0.0)
+
+    def test_rejects_a_non_positive_block_size(self) -> None:
+        with self.assertRaises(ValueError):
+            analyse_trace([(0, False)], block_size=0)
+
+    def test_cli_text_output(self) -> None:
+        path = self.path("t.trace")
+        write_trace(path, sequential(buffer_bytes=8 * 1024, passes=2))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["trace-stats", path])
+        self.assertEqual(code, 0)
+        printed = out.getvalue()
+        self.assertIn("accesses        :        2,048", printed)
+        self.assertIn("distinct blocks :          128", printed)
+        self.assertIn("footprint 8.0 KB at 64 B blocks", printed)
+        self.assertIn("6.25% of accesses", printed)
+
+    def test_cli_json_output_and_block_size_flag(self) -> None:
+        path = self.path("t.trace")
+        write_trace(path, sequential(buffer_bytes=8 * 1024, passes=2))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["trace-stats", "--block-size", "8", "--format", "json", path])
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["accesses"], 2048)
+        self.assertEqual(data["block_size"], 8)
+        self.assertEqual(data["distinct_blocks"], 1024)
+        self.assertEqual(data["distinct_pages"], 2)
+
+    def test_cli_reads_foreign_formats(self) -> None:
+        path = self.path("t.din")
+        write_trace(path, sequential(buffer_bytes=8 * 1024, passes=2), fmt="dinero")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["trace-stats", "--format", "json", path])
+        self.assertEqual(json.loads(out.getvalue())["distinct_blocks"], 128)
+
+    def test_cli_rejects_an_empty_trace(self) -> None:
+        path = self.write("empty.trace", "# nothing\n")
+        with self.assertRaises(SystemExit) as ctx:
+            main(["trace-stats", path])
+        self.assertIn("no accesses", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from cachesim.config import DEFAULT_CONFIG, ConfigError, load_config
 from cachesim.invariants import check_hierarchy
 from cachesim.report import print_report
 from cachesim.trace import FORMATS
+from cachesim.tracecmd import register as register_trace_stats
 from cachesim.workloads import SAMPLE_NAMES, WORKLOADS, write_traces
 
 Subparsers: TypeAlias = "argparse._SubParsersAction[argparse.ArgumentParser]"
@@ -148,6 +149,7 @@ def _register_sweep(subparsers: Subparsers) -> None:
 #: Subcommand registration functions, in the order shown by --help.
 COMMANDS: list[Callable[[Subparsers], None]] = [
     register_run,
+    register_trace_stats,
     _register_sweep,
     register_gen_traces,
 ]
