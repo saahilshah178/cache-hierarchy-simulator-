@@ -530,3 +530,22 @@ POLICIES: dict[str, type[ReplacementPolicy]] = {
     "drrip": DRRIPPolicy,
     "random": RandomPolicy,
 }
+
+
+def online_policy_names() -> list[str]:
+    """The registered policies one forward pass can run, sorted by name.
+
+    An offline policy (one whose ``sees_references`` is set, i.e. ``opt``)
+    has to be handed the level's whole reference stream before the first
+    probe, which only ``cachesim policies`` and the two-pass
+    ``cachesim.opt.simulate_with_opt`` driver do. Every command that builds
+    a cache and replays a trace straight through -- ``sweep``, ``sets`` --
+    offers this list rather than the whole registry, so that naming a
+    policy it cannot run is a usage error instead of a RuntimeError raised
+    mid-simulation.
+
+    It is a function, not a constant, because ``cachesim.opt`` adds to
+    ``POLICIES`` at import time: a tuple frozen at this module's import
+    would be read before that registration.
+    """
+    return sorted(name for name, cls in POLICIES.items() if not cls.sees_references)

@@ -68,17 +68,25 @@ from cachesim.plot import (
     plot_grid,
     plot_sweep,
 )
-from cachesim.policies import POLICIES
+from cachesim.policies import POLICIES, online_policy_names
 
 #: The parameters ``sweep`` knows how to vary.
 PARAMS = ("size", "associativity", "block_size", "policy")
+
+#: The policies this command can sweep: every online one in the registry.
+#:
+#: A sweep replays the trace once per point through a cache it has just
+#: built, so it can never hand an offline policy the reference stream that
+#: policy needs. Excluding them here is what makes ``--param policy`` and
+#: ``--policy`` agree; ``cachesim policies`` is the command that runs OPT.
+SWEEPABLE_POLICIES: tuple[str, ...] = tuple(online_policy_names())
 
 #: Default value list for each parameter, used when --values is omitted.
 DEFAULT_VALUES: dict[str, tuple[int | str, ...]] = {
     "size": tuple(kb * 1024 for kb in (1, 2, 4, 8, 16, 32, 64)),
     "associativity": (1, 2, 4, 8, 16),
     "block_size": (16, 32, 64, 128, 256),
-    "policy": tuple(sorted(POLICIES)),
+    "policy": SWEEPABLE_POLICIES,
 }
 
 #: Legacy shorthands kept so the two default sweeps read the same as before.
@@ -461,17 +469,27 @@ def parse_values(param: str, text: str) -> list[int | str]:
     """Parse a comma-separated --values list according to ``param``.
 
     Sizes and block sizes accept the k/M suffixes; associativity takes plain
-    integers; policy takes names checked against the registry.
+    integers; policy takes names checked against ``SWEEPABLE_POLICIES``, so
+    an offline policy is rejected here rather than raising from the first
+    probe of the first point.
     """
     items = [item.strip() for item in text.split(",") if item.strip()]
     if not items:
         raise argparse.ArgumentTypeError("--values must list at least one value")
     if param == "policy":
         for item in items:
-            if item.lower() not in POLICIES:
+            name = item.lower()
+            if name in SWEEPABLE_POLICIES:
+                continue
+            if name in POLICIES:
                 raise argparse.ArgumentTypeError(
-                    f"unknown policy {item!r}; choose from {', '.join(sorted(POLICIES))}"
+                    f"policy {item!r} is offline: it needs the whole reference stream "
+                    f"before the first access, which a sweep cannot supply. "
+                    f"Use `cachesim policies` to compare against it."
                 )
+            raise argparse.ArgumentTypeError(
+                f"unknown policy {item!r}; choose from {', '.join(SWEEPABLE_POLICIES)}"
+            )
         return [item.lower() for item in items]
     if param == "associativity":
         return [positive_int(item) for item in items]
@@ -543,9 +561,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--policy",
         default="lru",
-        # Offline policies need the whole reference stream of the level up
-        # front, which a sweep cannot supply: use the `policies` command.
-        choices=sorted(name for name, cls in POLICIES.items() if not cls.sees_references),
+        choices=SWEEPABLE_POLICIES,
         help="replacement policy (default lru; for the offline optimum see `cachesim policies`)",
     )
     parser.add_argument(

@@ -60,7 +60,7 @@ from typing import Any
 from cachesim.cache import Cache
 from cachesim.cliargs import load_trace, non_negative_int, parse_size, positive_int
 from cachesim.plot import format_bytes
-from cachesim.policies import POLICIES
+from cachesim.policies import online_policy_names
 
 Accesses = Sequence[tuple[int, bool]]
 
@@ -371,7 +371,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--policy",
         default="lru",
-        choices=sorted(name for name, cls in POLICIES.items() if not cls.sees_references),
+        choices=online_policy_names(),
         help="replacement policy (default lru; offline policies such as opt need a reference "
         "stream and are not accepted here)",
     )

@@ -21,6 +21,7 @@ from dataclasses import replace
 from cachesim import plot
 from cachesim.cache import Cache
 from cachesim.config import CacheSpec
+from cachesim.policies import POLICIES
 from cachesim.stackdist import per_set_profile
 from cachesim.sweep import (
     ASSOCIATIVITIES,
@@ -340,6 +341,22 @@ class TestParsing(unittest.TestCase):
         with self.assertRaises(argparse.ArgumentTypeError):
             parse_values("policy", "lru,nope")
 
+    def test_parse_values_rejects_an_offline_policy(self) -> None:
+        """A sweep cannot preload OPT's future, so naming it is a usage error."""
+        with self.assertRaises(argparse.ArgumentTypeError) as caught:
+            parse_values("policy", "lru,opt")
+        message = str(caught.exception)
+        self.assertIn("offline", message)
+        self.assertIn("cachesim policies", message)
+
+    def test_the_default_policy_list_holds_only_online_policies(self) -> None:
+        """The plain `--param policy` sweep must be runnable as it stands."""
+        self.assertIn("opt", POLICIES)
+        self.assertNotIn("opt", DEFAULT_VALUES["policy"])
+        for name in DEFAULT_VALUES["policy"]:
+            with self.subTest(policy=name):
+                self.assertFalse(POLICIES[str(name)].sees_references)
+
 
 class TestLegacyWrappers(unittest.TestCase):
     """The pre-rewrite helpers still work; they now return SweepRow."""
@@ -395,6 +412,8 @@ class TestSweepCLI(unittest.TestCase):
             (["--assoc", "3", self.trace], "not a multiple"),
             (["--param", "size", "--values", "junk", self.trace], "not a size"),
             (["--param", "policy", "--values", "nope", self.trace], "unknown policy"),
+            (["--param", "policy", "--values", "opt", self.trace], "offline"),
+            (["--policy", "opt", self.trace], "invalid choice"),
             (["--param", "size", "--grid", self.trace], "mutually exclusive"),
             (["--ways", "1,2", self.trace], "only applies to --grid"),
             (["--param", "size"], "needs a trace"),
@@ -416,6 +435,14 @@ class TestSweepCLI(unittest.TestCase):
         code, _, err = self.run_main([path])
         self.assertEqual(code, 2)
         self.assertIn("no accesses", err)
+
+    def test_policy_sweep_runs_with_no_values(self) -> None:
+        """`--param policy` with no --values is the documented invocation."""
+        code, out, _ = self.run_main(["--param", "policy", "--no-plot", self.trace])
+        self.assertEqual(code, 0)
+        self.assertIn("policy sweep", out)
+        for name in DEFAULT_VALUES["policy"]:
+            self.assertIn(str(name), out)
 
     def test_default_sweeps_print_both_tables(self) -> None:
         code, out, _ = self.run_main(["--size", "8192", "--no-plot", self.trace])

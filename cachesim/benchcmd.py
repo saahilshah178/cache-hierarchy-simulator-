@@ -37,8 +37,9 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from cachesim.config import DEFAULT_CONFIG, ConfigError, load_config
+from cachesim.config import DEFAULT_CONFIG, ConfigError, load_config, parse_config
 from cachesim.hierarchy import Hierarchy
+from cachesim.opt import uses_opt
 from cachesim.trace import FORMATS, load_trace
 
 #: Repetitions when ``--repeat`` is not given.
@@ -152,6 +153,20 @@ def run(args: argparse.Namespace) -> int:
             config = load_config(args.config)
         except (OSError, json.JSONDecodeError, ConfigError) as exc:
             sys.exit(f"error: cannot load config {args.config}: {exc}")
+    try:
+        spec = parse_config(config)
+    except ConfigError as exc:
+        sys.exit(f"error: invalid config: {exc}")
+    if uses_opt(spec):
+        # `run` and `compare` simulate OPT by replaying the trace twice, once
+        # to collect the future and once to use it. Timing that against an
+        # online policy's single pass would compare two different amounts of
+        # work, so bench declines rather than quietly measuring the wrong one.
+        sys.exit(
+            "error: bench times one replay, and the offline 'opt' policy needs two passes "
+            "over the trace; its timings would not be comparable with an online policy's. "
+            "Use `cachesim run` to simulate this config."
+        )
     start = time.perf_counter()
     try:
         accesses = load_trace(args.trace, args.trace_format)

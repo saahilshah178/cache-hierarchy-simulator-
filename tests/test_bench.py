@@ -139,6 +139,34 @@ class TestBenchCLI(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("--repeat", err)
 
+    def test_an_offline_policy_config_is_declined_not_crashed(self) -> None:
+        """`run` simulates this config; bench must say why it will not."""
+        path = os.path.join(self._tmp.name, "opt.json")
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "memory_access_time": 100,
+                    "levels": [
+                        {
+                            "name": "L1",
+                            "size": 4096,
+                            "block_size": 64,
+                            "associativity": 4,
+                            "hit_time": 1,
+                            "policy": "opt",
+                        }
+                    ],
+                },
+                f,
+            )
+        # The same config is a normal run: the guard is about bench, not the config.
+        self.assertEqual(self.run_main(["run", self.trace, "--config", path])[0], 0)
+        code, _, err = self.run_main(["bench", self.trace, "--config", path])
+        self.assertEqual(code, 1)
+        self.assertIn("error:", err)
+        self.assertIn("opt", err)
+        self.assertNotIn("Traceback", err)
+
 
 if __name__ == "__main__":
     unittest.main()
