@@ -25,8 +25,14 @@ jobs:
       - name: Smoke-test the CLI
         run: |
           cachesim gen-traces --out-dir traces sequential conflict
-          cachesim run traces/sequential.trace --config configs/default.json
+          cachesim run --check traces/sequential.trace --config configs/default.json
+          cachesim run --format json --config configs/prefetch_stride.json traces/conflict.trace > /dev/null
+          cachesim trace-stats traces/conflict.trace
           cachesim sweep --size 8192 traces/conflict.trace
+          cachesim policies --size 8192 traces/conflict.trace
+          cachesim mrc traces/conflict.trace --sets 64
+          cachesim compare traces/conflict.trace --config default --config configs/victim_cache.json
+          cachesim sets traces/conflict.trace --size 4k --assoc 1
 
   lint:
     name: lint and type-check
