@@ -275,10 +275,6 @@ diff /tmp/native.json /tmp/dinero.json && echo identical
 identical
 ```
 
-Note that the repository's `.gitignore` covers `traces/*.trace` and `traces/*.trace.gz`
-only, so a converted `.din` or `.lackey` file written into `traces/` shows up as
-untracked.
-
 ### Streaming versus materialising
 
 `open_trace(path, fmt="auto")` returns an iterator and holds the file open until it is
