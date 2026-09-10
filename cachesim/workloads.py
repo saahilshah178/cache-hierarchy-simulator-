@@ -1,30 +1,21 @@
 """Synthetic memory-access workloads.
 
 Each generator yields ``(address, op)`` pairs, where ``op`` is ``"R"`` or
-``"W"``, modelling a classic access pattern. All generators are seeded, so
-the traces they produce are reproducible.
+``"W"``, modelling one classic access pattern whose effect on a cache can
+be predicted in closed form. Generators are pure and deterministic:
+parameters have defaults, randomness is drawn from a ``random.Random``
+seeded by an argument, and nothing depends on the environment, so a name
+always produces the same trace byte for byte.
 
-sequential
-    A linear scan over a buffer, repeated. Every 64-byte block is used 8 times
-    (8-byte words), so misses only happen once per block per pass that does
-    not fit in the cache.
-random_access
-    Uniformly random addresses over a 16 MB region: almost no reuse.
-matmul (naive)
-    C = A x B for 64x64 matrices of doubles in i/j/k loop order. Walking B by
-    column strides 512 B per step; 512 is a power of two, so the column's
-    blocks alias to a small group of sets within each column walk.
-matmul (blocked)
-    The same multiplication iterated in 16x16 tiles so each tile of A, B and
-    C is reused while it is still cached.
-conflict_streams
-    Four sequential streams read in lockstep, with base addresses 1 MB apart.
-    Address X of every stream maps to the same set for any geometry with at
-    most 16384 sets, so hits require at least four ways.
-pointer_chase
-    Follows a randomly shuffled linked list through 1 MB, lapping it ~3.7
-    times. Every hop is unpredictable, but the list is reused lap to lap, so
-    a level that holds the whole megabyte serves the later laps.
+``WORKLOADS`` maps a name to a ``Workload`` record holding the generator
+(already bound to its default arguments), a description of the pattern,
+and the expectation: the closed form or limiting behaviour the pattern is
+designed to exhibit against a cache. ``cachesim gen-traces --list`` prints
+the registry; ``cachesim gen-traces NAME...`` writes any of it.
+
+``SAMPLE_NAMES`` are the six workloads ``gen-traces`` writes by default and
+the ones whose simulation results are pinned by the golden regression
+tests, so their generators must not change output once released.
 """
 
 from __future__ import annotations
@@ -32,6 +23,8 @@ from __future__ import annotations
 import os
 import random
 from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
+from functools import partial
 
 # Re-exported (the `as` form marks it deliberate for mypy): a generator and
 # the writer that serialises it are usually wanted together.
@@ -143,26 +136,136 @@ def pointer_chase(
         node = next_of[node]
 
 
-#: The sample traces shipped with the project: file name -> generator.
-SAMPLE_TRACES: dict[str, Callable[[], Iterator[Access]]] = {
-    "sequential": sequential,
-    "random": random_access,
-    "matmul_naive": lambda: matmul(n=64),
-    "matmul_blocked": lambda: matmul(n=64, tile=16),
-    "conflict": conflict_streams,
-    "pointer_chase": pointer_chase,
-}
+@dataclass(frozen=True)
+class Workload:
+    """A named access pattern, with the behaviour it is designed to show.
+
+    name        : registry key, and the stem of the file ``gen-traces`` writes.
+    description : what the pattern accesses, and with which parameters.
+    generator   : the generator bound to its default arguments; calling it
+                  yields the trace as ``(address, "R"|"W")`` pairs.
+    expectation : the closed form or limiting behaviour to expect, stated
+                  precisely enough to check against a simulation.
+    """
+
+    name: str
+    description: str
+    generator: Callable[[], Iterator[Access]]
+    expectation: str
 
 
-def write_sample_traces(
+_WORKLOAD_LIST: tuple[Workload, ...] = (
+    Workload(
+        name="sequential",
+        description=(
+            "Linear scan of a 256 KB buffer by 8-byte words, twice, "
+            "with every tenth access a store."
+        ),
+        generator=sequential,
+        expectation=(
+            "One miss per 64-byte block per pass that does not fit: the 32 KB L1 misses "
+            "1 access in 8 (8 words per block), and the 256 KB L2 holds the buffer, so "
+            "only the first pass reaches DRAM (4096 blocks)."
+        ),
+    ),
+    Workload(
+        name="random",
+        description=(
+            "Uniformly random 8-byte accesses over a 16 MB region, a quarter of them stores."
+        ),
+        generator=random_access,
+        expectation=(
+            "No reuse to speak of: a cache of C bytes settles at a miss rate of "
+            "1 - C/16 MB, so a 2 MB last level lets 87.5% of accesses through to DRAM "
+            "in steady state (91.2% measured from cold over 60,000 accesses)."
+        ),
+    ),
+    Workload(
+        name="matmul_naive",
+        description=(
+            "C = A x B for 64x64 matrices of doubles in i/j/k loop order, walking B by column."
+        ),
+        generator=partial(matmul, n=64),
+        expectation=(
+            "B's column walk strides 512 B, a power of two, so a column's 64 blocks "
+            "alias onto 8 sets of the 4-way L1 and are evicted before the next column "
+            "reuses them; DRAM traffic still falls to the compulsory floor of "
+            "3 x 512 = 1536 blocks."
+        ),
+    ),
+    Workload(
+        name="matmul_blocked",
+        description="The same 64x64 multiplication iterated in 16x16 tiles.",
+        generator=partial(matmul, n=64, tile=16),
+        expectation=(
+            "Each 16x16 tile of A, B and C is 2 KB, so all three stay in the 32 KB L1 "
+            "while they are reused: L1 misses drop from 27,912 to 3,572 for the same "
+            "1536-block DRAM footprint."
+        ),
+    ),
+    Workload(
+        name="conflict",
+        description="Four sequential streams read in lockstep, their bases 1 MB apart.",
+        generator=conflict_streams,
+        expectation=(
+            "1 MB is 16,384 blocks, so element X of every stream maps to one set for any "
+            "geometry with at most 16,384 sets: a 4-way L1 holds all four hot blocks and "
+            "misses 1 access in 8, while 1 or 2 ways miss every access. No block is ever "
+            "revisited, so every miss is compulsory and no lower level ever hits."
+        ),
+    ),
+    Workload(
+        name="pointer_chase",
+        description=(
+            "60,000 hops around a randomly shuffled 16,384-node linked list "
+            "spanning 1 MB, one 64-byte node per hop."
+        ),
+        generator=pointer_chase,
+        expectation=(
+            "Hops are unpredictable and each node has its own block, so the 32 KB L1 and "
+            "256 KB L2 never hit; the 2 MB L3 holds the whole list, so only the first lap "
+            "misses there: 16,384 misses out of 60,000, the compulsory floor."
+        ),
+    ),
+)
+
+#: Every synthetic workload, by name, in registry order.
+WORKLOADS: dict[str, Workload] = {w.name: w for w in _WORKLOAD_LIST}
+
+#: The workloads ``gen-traces`` writes when given no names. These six are
+#: pinned by the golden regression tests: their output must not change.
+SAMPLE_NAMES: tuple[str, ...] = (
+    "sequential",
+    "random",
+    "matmul_naive",
+    "matmul_blocked",
+    "conflict",
+    "pointer_chase",
+)
+
+
+def get_workload(name: str) -> Workload:
+    """Look up a workload by name, or raise ``ValueError`` listing the names."""
+    try:
+        return WORKLOADS[name]
+    except KeyError:
+        raise ValueError(f"unknown workload {name!r}; choose from {', '.join(WORKLOADS)}") from None
+
+
+def write_traces(
     out_dir: str, names: Iterable[str] | None = None, verbose: bool = True
 ) -> dict[str, int]:
-    """Generate the sample traces into ``out_dir``; returns name -> access count."""
+    """Write one native-format trace per named workload into ``out_dir``.
+
+    ``names`` defaults to ``SAMPLE_NAMES``. Returns name -> access count;
+    each file is ``<out_dir>/<name>.trace``.
+    """
     os.makedirs(out_dir, exist_ok=True)
     counts: dict[str, int] = {}
-    for name in names or SAMPLE_TRACES:
+    for name in names or SAMPLE_NAMES:
+        workload = get_workload(name)
         path = os.path.join(out_dir, f"{name}.trace")
-        counts[name] = write_trace(path, SAMPLE_TRACES[name]())
+        counts[name] = write_trace(path, workload.generator())
         if verbose:
             print(f"  {name + '.trace':22s} {counts[name]:>9,} accesses")
     return counts

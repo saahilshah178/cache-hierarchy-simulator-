@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import textwrap
 from collections.abc import Callable, Sequence
 from typing import TypeAlias
 
@@ -18,7 +19,7 @@ from cachesim.config import DEFAULT_CONFIG, ConfigError, load_config
 from cachesim.invariants import check_hierarchy
 from cachesim.report import print_report
 from cachesim.trace import FORMATS
-from cachesim.workloads import SAMPLE_TRACES, write_sample_traces
+from cachesim.workloads import SAMPLE_NAMES, WORKLOADS, write_traces
 
 Subparsers: TypeAlias = "argparse._SubParsersAction[argparse.ArgumentParser]"
 
@@ -97,20 +98,44 @@ def register_run(subparsers: Subparsers) -> None:
 
 
 def _cmd_gen_traces(args: argparse.Namespace) -> int:
+    if args.list:
+        for workload in WORKLOADS.values():
+            print(workload.name)
+            print(
+                textwrap.fill(
+                    workload.description, width=78, initial_indent="  ", subsequent_indent="  "
+                )
+            )
+            print(
+                textwrap.fill(
+                    f"expectation: {workload.expectation}",
+                    width=78,
+                    initial_indent="  ",
+                    subsequent_indent="  ",
+                )
+            )
+        return 0
     print(f"generating traces in {args.out_dir}:")
-    write_sample_traces(args.out_dir, args.names or None)
+    write_traces(args.out_dir, args.names or None)
     return 0
 
 
 def register_gen_traces(subparsers: Subparsers) -> None:
-    p = subparsers.add_parser("gen-traces", help="write the sample traces")
+    p = subparsers.add_parser("gen-traces", help="write synthetic workload traces")
     p.add_argument(
         "names",
         nargs="*",
-        choices=sorted(SAMPLE_TRACES),
-        help="which traces to write (default: all)",
+        choices=sorted(WORKLOADS),
+        metavar="NAME",
+        help=f"workloads to write (default: the {len(SAMPLE_NAMES)} samples "
+        f"{', '.join(SAMPLE_NAMES)}); see --list",
     )
     p.add_argument("--out-dir", default="traces", help="output directory (default: traces)")
+    p.add_argument(
+        "--list",
+        action="store_true",
+        help="print every workload's name, description and expectation, and write nothing",
+    )
     p.set_defaults(func=_cmd_gen_traces)
 
 
