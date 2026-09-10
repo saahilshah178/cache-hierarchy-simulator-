@@ -374,6 +374,17 @@ class _RRIP(ReplacementPolicy):
     def _insert_rrpv(self, set_idx: int) -> int:
         raise NotImplementedError
 
+    def _bimodal(self) -> int:
+        """BRRIP's insertion draw: RRPV 2 once in ``BRRIP_EPSILON``, else 3.
+
+        Lives on the base class because BRRIP always inserts this way and
+        DRRIP inserts this way in its BRRIP leaders and in its followers
+        while BRRIP is winning the duel -- one rule, two users.
+        """
+        if self.rng.randrange(BRRIP_EPSILON) == 0:
+            return RRPV_LONG
+        return RRPV_DISTANT
+
     def on_hit(self, set_idx: int, way: int, block: int) -> None:
         self._rrpv[set_idx][way] = RRPV_NEAR
 
@@ -424,9 +435,7 @@ class BRRIPPolicy(_RRIP):
     """
 
     def _insert_rrpv(self, set_idx: int) -> int:
-        if self.rng.randrange(BRRIP_EPSILON) == 0:
-            return RRPV_LONG
-        return RRPV_DISTANT
+        return self._bimodal()
 
 
 class DRRIPPolicy(_RRIP):
@@ -495,11 +504,6 @@ class DRRIPPolicy(_RRIP):
     def following(self) -> str:
         """The insertion policy the follower sets are using right now."""
         return "srrip" if self.psel < self.PSEL_THRESHOLD else "brrip"
-
-    def _bimodal(self) -> int:
-        if self.rng.randrange(BRRIP_EPSILON) == 0:
-            return RRPV_LONG
-        return RRPV_DISTANT
 
     def _insert_rrpv(self, set_idx: int) -> int:
         role = self._role[set_idx]

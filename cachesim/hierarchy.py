@@ -205,7 +205,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from cachesim.cache import Cache, Evicted
-from cachesim.config import ConfigError, HierarchySpec, parse_config
+from cachesim.config import (
+    INCLUSION_POLICIES,
+    WRITE_POLICIES,
+    ConfigError,
+    HierarchySpec,
+    parse_config,
+)
 from cachesim.dram import ConstantMemory, MemoryModel
 from cachesim.prefetch import make_prefetcher
 from cachesim.stats import HierarchyStats, collect
@@ -244,10 +250,16 @@ class Level:
         bus_width: int | None = None,
         prefetcher: str = "none",
     ) -> None:
-        if inclusion not in ("nine", "inclusive", "exclusive"):
-            raise ValueError(f"{cache.name}: unknown inclusion policy {inclusion!r}")
-        if write_policy not in ("write-back", "write-through"):
-            raise ValueError(f"{cache.name}: unknown write policy {write_policy!r}")
+        if inclusion not in INCLUSION_POLICIES:
+            raise ValueError(
+                f"{cache.name}: unknown inclusion policy {inclusion!r}; "
+                f"choose from {', '.join(INCLUSION_POLICIES)}"
+            )
+        if write_policy not in WRITE_POLICIES:
+            raise ValueError(
+                f"{cache.name}: unknown write policy {write_policy!r}; "
+                f"choose from {', '.join(WRITE_POLICIES)}"
+            )
         if bus_width is not None and bus_width < 1:
             raise ValueError(f"{cache.name}: bus_width must be positive, got {bus_width}")
         self.cache = cache
