@@ -30,7 +30,7 @@ from cachesim.report import build_report, format_report, print_report
 from cachesim.stats import HierarchyStats, LevelStats, MemoryStats, ThreeCStats
 from cachesim.trace import load_trace, parse_trace
 
-__version__ = "0.9.0"
+__version__ = "1.0.0"
 
 __all__ = [
     "DEFAULT_CONFIG",
