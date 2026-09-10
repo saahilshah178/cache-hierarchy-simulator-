@@ -369,7 +369,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--assoc", type=positive_int, default=4, help="ways per set (default 4)")
     parser.add_argument(
-        "--policy", default="lru", choices=sorted(POLICIES), help="replacement policy (default lru)"
+        "--policy",
+        default="lru",
+        choices=sorted(name for name, cls in POLICIES.items() if not cls.sees_references),
+        help="replacement policy (default lru; offline policies such as opt need a reference "
+        "stream and are not accepted here)",
     )
     parser.add_argument(
         "--window",

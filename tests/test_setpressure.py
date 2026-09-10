@@ -277,6 +277,11 @@ class TestSetsCLI(unittest.TestCase):
                 code = int(exc.code) if exc.code is not None else 0
         return code, out.getvalue(), err.getvalue()
 
+    def test_offline_policies_are_not_offered(self) -> None:
+        code, _, err = self.run_main([self.trace, "--policy", "opt"])
+        self.assertEqual(code, 2)
+        self.assertIn("invalid choice: 'opt'", err)
+
     def test_text_report_has_both_sections(self) -> None:
         code, out, _ = self.run_main([self.trace, "--size", "4k", "--assoc", "1"])
         self.assertEqual(code, 0)
