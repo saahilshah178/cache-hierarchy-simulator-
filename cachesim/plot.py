@@ -63,15 +63,23 @@ def available() -> bool:
     return importlib.util.find_spec("matplotlib") is not None
 
 
-def format_bytes(nbytes: int) -> str:
+def format_bytes(nbytes: int, *, decimals: int | None = None) -> str:
     """``32768`` -> ``'32 KB'``, ``2097152`` -> ``'2 MB'``, ``64`` -> ``'64 B'``.
 
     Used for axis labels and for the size columns of the analysis tables, so
     the two always agree. Fractional values keep one decimal (``'1.5 KB'``).
+
+    ``decimals`` fixes the number of decimal places instead of dropping a
+    trailing zero, which is the convention the ``run`` and ``trace-stats``
+    reports use: ``format_bytes(32768, decimals=1)`` is ``'32.0 KB'``. That
+    is the only difference between the two, and this is the only place it
+    is decided -- the reports used to carry a copy of this function each.
     """
     for unit, scale in (("MB", 1 << 20), ("KB", 1 << 10)):
         if nbytes >= scale:
             value = nbytes / scale
+            if decimals is not None:
+                return f"{value:.{decimals}f} {unit}"
             return f"{value:.0f} {unit}" if value == int(value) else f"{value:.1f} {unit}"
     return f"{nbytes} B"
 

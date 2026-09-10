@@ -7,6 +7,7 @@ miss rates, the miss classification, and AMAT.
 from __future__ import annotations
 
 from cachesim.hierarchy import Hierarchy
+from cachesim.plot import format_bytes
 from cachesim.stats import HierarchyStats
 
 BAR = "=" * 72
@@ -17,13 +18,15 @@ def _pct(part: float, whole: float) -> str:
     return f"{100.0 * part / whole:6.2f}%" if whole else "   n/a "
 
 
-def _size_str(nbytes: int) -> str:
-    """32768 -> '32.0 KB', 2097152 -> '2.0 MB'."""
-    if nbytes >= 1 << 20:
-        return f"{nbytes / (1 << 20):.1f} MB"
-    if nbytes >= 1 << 10:
-        return f"{nbytes / (1 << 10):.1f} KB"
-    return f"{nbytes} B"
+def format_size(nbytes: int) -> str:
+    """32768 -> '32.0 KB', 2097152 -> '2.0 MB'.
+
+    The report's fixed-one-decimal convention, from the one implementation
+    the whole package shares; ``plot.format_bytes`` without ``decimals`` is
+    the same figure with a trailing zero dropped, which is what the
+    analysis tables and the axis labels use.
+    """
+    return format_bytes(nbytes, decimals=1)
 
 
 def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
@@ -72,7 +75,7 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
         if lv.victim_cache_entries:
             extra += f", {lv.victim_cache_entries}-entry victim cache"
         lines.append(
-            f"--- {lv.name}: {_size_str(lv.size)}, {lv.block_size} B blocks, "
+            f"--- {lv.name}: {format_size(lv.size)}, {lv.block_size} B blocks, "
             f"{lv.associativity}-way, {lv.policy.upper()}, hit time {lv.hit_time} cyc"
             f"{extra} ---"
         )
@@ -115,8 +118,8 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
                 "   (write misses passed down instead of allocating)"
             )
         lines.append(
-            f"  traffic     : {_size_str(lv.bytes_read_from_below):>12} in from below"
-            f" / {_size_str(lv.bytes_written_below)} out below"
+            f"  traffic     : {format_size(lv.bytes_read_from_below):>12} in from below"
+            f" / {format_size(lv.bytes_written_below)} out below"
         )
         if lv.prefetcher != "none":
             lines.append(
@@ -157,8 +160,8 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
 
     lines.append(BAR)
     lines.append(
-        f"DRAM traffic            : {_size_str(s.dram_bytes_read)} read"
-        f" / {_size_str(s.dram_bytes_written)} written"
+        f"DRAM traffic            : {format_size(s.dram_bytes_read)} read"
+        f" / {format_size(s.dram_bytes_written)} written"
     )
     m = s.memory
     if m.type != "constant":

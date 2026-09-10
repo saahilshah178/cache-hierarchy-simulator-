@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import unittest
 
+from cachesim import tracecmd
 from cachesim.cache import Cache
 from cachesim.hierarchy import Hierarchy, Level
-from cachesim.report import _pct, _size_str, build_report, format_report
+from cachesim.plot import format_bytes
+from cachesim.report import _pct, build_report, format_report, format_size
 from cachesim.stats import SCHEMA_VERSION, HierarchyStats
 
 
@@ -29,12 +31,31 @@ class TestFormatting(unittest.TestCase):
         self.assertEqual(_pct(3, 3), "100.00%")
 
     def test_size_str(self) -> None:
-        self.assertEqual(_size_str(0), "0 B")
-        self.assertEqual(_size_str(1023), "1023 B")
-        self.assertEqual(_size_str(1024), "1.0 KB")
-        self.assertEqual(_size_str(1536), "1.5 KB")
-        self.assertEqual(_size_str(1 << 20), "1.0 MB")
-        self.assertEqual(_size_str(3 << 19), "1.5 MB")
+        self.assertEqual(format_size(0), "0 B")
+        self.assertEqual(format_size(1023), "1023 B")
+        self.assertEqual(format_size(1024), "1.0 KB")
+        self.assertEqual(format_size(1536), "1.5 KB")
+        self.assertEqual(format_size(1 << 20), "1.0 MB")
+        self.assertEqual(format_size(3 << 19), "1.5 MB")
+
+    def test_the_two_byte_conventions_differ_only_in_the_trailing_zero(self) -> None:
+        """One implementation, one flag: the reports keep the .0, the tables drop it.
+
+        There used to be three copies of this arithmetic, two of them
+        byte-identical, so the same cache could print as 32.0 KB in `run`
+        and 32 KB in `sweep` with nothing tying the two together.
+        """
+        for nbytes in (0, 64, 1023, 1024, 1536, 32768, 1 << 20, 3 << 19, 2 << 20):
+            with self.subTest(nbytes=nbytes):
+                self.assertEqual(format_size(nbytes), format_bytes(nbytes, decimals=1))
+                self.assertEqual(format_size(nbytes).replace(".0 ", " "), format_bytes(nbytes))
+
+    def test_trace_stats_formats_sizes_like_the_report(self) -> None:
+        """The two used to hold byte-identical private copies of this."""
+        stats = tracecmd.analyse_trace([(0, False)], block_size=1024)
+        rendered = tracecmd.format_stats(stats)
+        self.assertIn(f"footprint {format_size(1024)} at 1024 B blocks", rendered)
+        self.assertIn(f"({format_size(stats.page_size)} pages)", rendered)
 
 
 class TestStats(unittest.TestCase):

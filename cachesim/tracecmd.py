@@ -28,6 +28,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from cachesim.cliargs import parse_size
+from cachesim.report import format_size
 from cachesim.trace import FORMATS, open_trace
 
 #: The page size the page count is reported at: 4 KB, the size on x86-64 and
@@ -113,15 +114,6 @@ def analyse_trace(
     )
 
 
-def _size_str(nbytes: int) -> str:
-    """32768 -> '32.0 KB', 2097152 -> '2.0 MB'."""
-    if nbytes >= 1 << 20:
-        return f"{nbytes / (1 << 20):.1f} MB"
-    if nbytes >= 1 << 10:
-        return f"{nbytes / (1 << 10):.1f} KB"
-    return f"{nbytes} B"
-
-
 def format_stats(stats: TraceStats, trace_name: str | None = None) -> str:
     """Render a ``TraceStats`` as the text report ``trace-stats`` prints."""
     s = stats
@@ -144,8 +136,8 @@ def format_stats(stats: TraceStats, trace_name: str | None = None) -> str:
             f"  reads           : {s.reads:>12,}   ({reads_pct:5.1f}%)",
             f"  writes          : {s.writes:>12,}   ({writes_pct:5.1f}%)",
             f"  distinct blocks : {s.distinct_blocks:>12,}   "
-            f"(footprint {_size_str(s.footprint_bytes)} at {s.block_size} B blocks)",
-            f"  distinct pages  : {s.distinct_pages:>12,}   ({_size_str(s.page_size)} pages)",
+            f"(footprint {format_size(s.footprint_bytes)} at {s.block_size} B blocks)",
+            f"  distinct pages  : {s.distinct_pages:>12,}   ({format_size(s.page_size)} pages)",
             f"  address range   : {low} .. {high}   (span {span})",
             f"  first touches   : {s.first_touches:>12,}   "
             f"({100 * s.compulsory_fraction:5.2f}% of accesses: the compulsory-miss floor)",
