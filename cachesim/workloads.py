@@ -136,6 +136,203 @@ def pointer_chase(
         node = next_of[node]
 
 
+def strided(
+    stride_bytes: int = 512, count: int = 1024, passes: int = 4, base: int = 0x0400_0000
+) -> Iterator[Access]:
+    """Read ``count`` addresses ``stride_bytes`` apart, ``passes`` times over.
+
+    Closed form, for ``stride_bytes >= block_size`` (so each access is a
+    block of its own) and LRU:
+
+    * every pass touches exactly ``count`` distinct blocks, a footprint of
+      ``count * block_size`` bytes of cache;
+    * if the footprint exceeds the capacity the pass is a cyclic sweep
+      longer than the cache, LRU's worst case, and all ``count`` accesses of
+      every pass miss;
+    * if it fits, only the first pass misses (``count`` compulsory misses)
+      and the remaining ``(passes - 1) * count`` accesses hit.
+
+    A power-of-two stride shrinks the effective capacity further, because
+    the blocks reach only ``num_sets / (stride_bytes / block_size)`` of the
+    sets (D. H. Bailey, "Unfavorable Strides in Cache Memory Systems",
+    Scientific Programming 4(2), 1995).
+    """
+    for _ in range(passes):
+        for i in range(count):
+            yield base + i * stride_bytes, "R"
+
+
+def column_walk(
+    rows: int = 256,
+    cols: int = 256,
+    row_stride_bytes: int | None = None,
+    base: int = 0x0500_0000,
+) -> Iterator[Access]:
+    """Walk a row-major matrix of doubles down each column in turn.
+
+    Element (i, j) lives at ``base + i*row_stride + j*8``; the loop nest is
+    j outer, i inner, so consecutive accesses are one row stride apart.
+    ``row_stride_bytes`` defaults to ``cols * 8``, the unpadded layout.
+
+    A block holds 8 doubles, so 8 consecutive columns share one block per
+    row: column j+1 is entirely reuse of the blocks column j fetched, and
+    the compulsory floor is ``rows * ceil(cols / 8)`` blocks. Whether that
+    reuse survives depends on the stride. With the unpadded power-of-two
+    stride the ``rows`` blocks of a column land on only
+    ``num_sets / (row_stride / block_size)`` sets and evict one another
+    before the next column arrives; padding the stride by one block
+    (``row_stride_bytes = cols*8 + 64``) makes the row-to-row distance an
+    odd number of blocks, which is coprime with any power-of-two set count,
+    so a column spreads over every set and the reuse is realised
+    (D. H. Bailey, "Unfavorable Strides in Cache Memory Systems",
+    Scientific Programming 4(2), 1995).
+    """
+    row_stride = cols * WORD if row_stride_bytes is None else row_stride_bytes
+    for j in range(cols):
+        for i in range(rows):
+            yield base + i * row_stride + j * WORD, "R"
+
+
+def stencil_2d(n: int = 96, passes: int = 2, base: int = 0x0600_0000) -> Iterator[Access]:
+    """Five-point Jacobi stencil over an ``n`` x ``n`` grid of doubles.
+
+    For each interior point (i, j) the pass reads in(i,j), in(i-1,j),
+    in(i+1,j), in(i,j-1), in(i,j+1) and writes out(i,j): five reads and one
+    write, ``6 * (n-2)**2`` accesses per pass. ``out`` is placed one block
+    past the end of ``in`` so the two arrays are offset by an odd number of
+    blocks and do not systematically alias.
+
+    Closed form, for a cache that holds three grid rows of ``in`` plus one
+    of ``out`` (``4 * n * 8`` bytes): the sweep of row i has already
+    fetched rows i-1 and i, so the only new data is row i+1 of ``in`` and
+    row i of ``out``, one block per 8 elements each. The miss rate tends to
+    2 misses per 8 interior points, or 1 miss per 24 accesses; the
+    compulsory floor is the blocks of the two arrays, ceil(n*n/8) for
+    ``in`` plus those spanning the interior of ``out`` (2280 at n=96)
+    (R. Rivera and C.-W. Tseng, "Tiling Optimizations for 3D Scientific
+    Computations", SC 2000).
+    """
+    grid_bytes = n * n * WORD
+    in_base = base
+    out_base = base + grid_bytes + BLOCK
+    for _ in range(passes):
+        for i in range(1, n - 1):
+            for j in range(1, n - 1):
+                centre = in_base + (i * n + j) * WORD
+                yield centre, "R"
+                yield in_base + ((i - 1) * n + j) * WORD, "R"
+                yield in_base + ((i + 1) * n + j) * WORD, "R"
+                yield centre - WORD, "R"
+                yield centre + WORD, "R"
+                yield out_base + (i * n + j) * WORD, "W"
+
+
+def transpose(n: int = 128, base: int = 0x0700_0000) -> Iterator[Access]:
+    """B = A-transpose for ``n`` x ``n`` doubles: read A by row, write B by column.
+
+    Element (i, j) of A is read from ``base + (i*n + j)*8`` and written to
+    B at ``b_base + (j*n + i)*8``, with B placed one block past the end of
+    A. ``2 * n**2`` accesses.
+
+    Closed form: the reads of A are sequential, so 1 in 8 misses. The
+    writes of B stride ``n * 8`` bytes, one block each, so every write is a
+    fresh block: with a power-of-two ``n`` those blocks alias onto
+    ``num_sets / (n*8 / block_size)`` sets and a column of B is evicted long
+    before the next column reuses it, giving 1 miss per write. Misses per
+    element therefore tend to 1 + 1/8 = 1.125 until the cache holds a whole
+    column of blocks of B (S. Chatterjee and S. Sen, "Cache-Efficient Matrix
+    Transposition", HPCA 2000).
+    """
+    a_base = base
+    b_base = base + n * n * WORD + BLOCK
+    for i in range(n):
+        for j in range(n):
+            yield a_base + (i * n + j) * WORD, "R"
+            yield b_base + (j * n + i) * WORD, "W"
+
+
+def binary_search(
+    n_elements: int = 65_536, queries: int = 5_000, seed: int = 3, base: int = 0x0800_0000
+) -> Iterator[Access]:
+    """Binary-search a sorted array of 8-byte keys for ``queries`` random targets.
+
+    The array holds the keys 0..n_elements-1 in order, so searching for the
+    key at index t probes the same positions a real search would (D. E.
+    Knuth, "The Art of Computer Programming", Vol. 3, 2nd ed., 1998,
+    section 6.2.1); each probe reads one 8-byte key and the search stops on
+    the hit. Targets are drawn from a ``random.Random(seed)``, so the trace
+    is fixed by the seed.
+
+    Closed form: a query probes about log2(n_elements) positions, but the
+    probes form a binary tree whose level d has only 2^d distinct
+    positions, so the top levels are a handful of blocks that stay resident
+    while the deep levels are effectively random over the array. A cache of
+    C bytes holds the top log2(C / block_size) levels of that tree, leaving
+    roughly log2(n_elements * 8 / C) probes per query to miss.
+    """
+    rng = random.Random(seed)
+    for _ in range(queries):
+        target = rng.randrange(n_elements)
+        lo, hi = 0, n_elements - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            yield base + mid * WORD, "R"
+            if mid == target:
+                break
+            if mid < target:
+                lo = mid + 1
+            else:
+                hi = mid - 1
+
+
+def hash_probe(
+    table_bytes: int = 1024 * 1024,
+    probes: int = 60_000,
+    seed: int = 4,
+    base: int = 0x0900_0000,
+) -> Iterator[Access]:
+    """Read uniformly random 8-byte slots of a ``table_bytes`` table.
+
+    The access pattern of a lookup in a large hash table: the index is
+    unpredictable and every slot is equally likely, so there is no locality
+    beyond the block a probe lands in.
+
+    Closed form: under the independent reference model with uniform
+    probabilities, an LRU cache of C bytes holds a C/table_bytes fraction of
+    the table and the steady-state miss rate is 1 - C/table_bytes
+    (E. G. Coffman and P. J. Denning, "Operating Systems Theory",
+    Prentice-Hall, 1973, chapter 6). The measured rate approaches it from
+    above, because the cache starts empty.
+    """
+    rng = random.Random(seed)
+    slots = table_bytes // WORD
+    for _ in range(probes):
+        yield base + rng.randrange(slots) * WORD, "R"
+
+
+def cyclic(
+    blocks: int = 1024, passes: int = 8, block_bytes: int = BLOCK, base: int = 0x0A00_0000
+) -> Iterator[Access]:
+    """Touch blocks 0..``blocks``-1 in order, ``passes`` times: LRU's worst case.
+
+    Closed form, for a cache holding K blocks:
+
+    * K >= blocks: only the first pass misses, ``blocks`` compulsory misses
+      in ``blocks * passes`` accesses;
+    * K < blocks: LRU evicts each block exactly one access before it is
+      needed again, so every access of every pass misses, a 100% miss rate
+      no matter how close K is to ``blocks``.
+
+    The cliff between the two is the classic demonstration that LRU is not
+    resistant to cyclic reuse patterns (L. A. Belady, "A Study of
+    Replacement Algorithms for a Virtual-Storage Computer", IBM Systems
+    Journal 5(2), 1966).
+    """
+    for _ in range(passes):
+        for b in range(blocks):
+            yield base + b * block_bytes, "R"
+
+
 @dataclass(frozen=True)
 class Workload:
     """A named access pattern, with the behaviour it is designed to show.
@@ -225,6 +422,87 @@ _WORKLOAD_LIST: tuple[Workload, ...] = (
             "Hops are unpredictable and each node has its own block, so the 32 KB L1 and "
             "256 KB L2 never hit; the 2 MB L3 holds the whole list, so only the first lap "
             "misses there: 16,384 misses out of 60,000, the compulsory floor."
+        ),
+    ),
+    Workload(
+        name="strided",
+        description="Reads 1024 addresses 512 B apart, four times over.",
+        generator=strided,
+        expectation=(
+            "Each pass touches 1024 distinct blocks, a 64 KB footprint that both the "
+            "256 KB L2 and the 2 MB L3 could hold; but a 512 B stride reaches only one "
+            "set in eight, so L1 and L2 miss all 4096 accesses and only the 16-way L3 "
+            "keeps the footprint, missing just the first pass (1024)."
+        ),
+    ),
+    Workload(
+        name="column_walk",
+        description=("Column-major walk of a 256x256 row-major matrix of doubles, 2048 B rows."),
+        generator=column_walk,
+        expectation=(
+            "Eight columns share one block per row, so the compulsory floor is 8192 "
+            "blocks; unpadded, the power-of-two row stride confines a column to one set "
+            "in 32 and all 65,536 accesses miss L1, while padding the row stride by one "
+            "block (row_stride_bytes=2112) brings L1 misses down to the 8192 floor and "
+            "the run from 4,489,216 to 1,507,328 cycles."
+        ),
+    ),
+    Workload(
+        name="stencil_2d",
+        description="Two passes of a 5-point Jacobi stencil over a 96x96 grid of doubles.",
+        generator=stencil_2d,
+        expectation=(
+            "Three grid rows stay resident, so the miss rate tends to 2 misses per 8 "
+            "interior points, one for each array: 4560 L1 misses in 106,032 accesses "
+            "(4.30%, against 1/24 = 4.17% asymptotically), and DRAM sees exactly the "
+            "2280-block compulsory floor."
+        ),
+    ),
+    Workload(
+        name="transpose",
+        description=(
+            "B = A-transpose for 128x128 doubles: A read row-major, B written column-major."
+        ),
+        generator=transpose,
+        expectation=(
+            "The sequential reads miss 1 in 8 and every column-major write misses, so "
+            "misses per element tend to 1.125: exactly 18,432 L1 misses for 16,384 "
+            "elements, at the 4096-block DRAM floor."
+        ),
+    ),
+    Workload(
+        name="binary_search",
+        description=(
+            "5000 binary searches for uniformly random keys in a sorted 512 KB array "
+            "of 65,536 8-byte keys."
+        ),
+        generator=binary_search,
+        expectation=(
+            "15.0 probes per query on average (74,982 accesses); the top levels of the "
+            "search tree are a handful of blocks and stay cached, so the miss rate falls "
+            "with cache size: 83.1% at the 32 KB L1, 48.7% at the 256 KB L2, 22.1% at "
+            "the 2 MB L3."
+        ),
+    ),
+    Workload(
+        name="hash_probe",
+        description="60,000 uniformly random 8-byte probes into a 1 MB table.",
+        generator=hash_probe,
+        expectation=(
+            "The independent-reference model puts an LRU cache of C bytes at a "
+            "steady-state miss rate of 1 - C/1 MB: the 32 KB L1 measures 96.89% against "
+            "96.875% predicted, and the 2 MB L3 holds the table, converging on its "
+            "compulsory floor (15,975 of the 16,384 blocks are ever probed)."
+        ),
+    ),
+    Workload(
+        name="cyclic",
+        description="Eight passes over 1024 consecutive 64-byte blocks, one access each.",
+        generator=cyclic,
+        expectation=(
+            "The 64 KB cycle exceeds the 32 KB L1, so LRU evicts every block one access "
+            "before it is needed again and all 8192 accesses miss; the 256 KB L2 holds "
+            "the cycle, so only the first pass misses there (1024, 1 in 8)."
         ),
     ),
 )
