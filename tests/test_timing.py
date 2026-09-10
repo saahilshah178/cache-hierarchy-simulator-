@@ -307,5 +307,89 @@ class TestSampleTraceBlockSizeTable(unittest.TestCase):
         self.assertLess(amats[256], amats[512])
 
 
+class TestAmatApproximationWhenALevelDoesNotFill(unittest.TestCase):
+    """Pins the one documented gap between ``amat()`` and ``measured_amat()``.
+
+    The analytic formula charges every level its transfer term once per
+    miss of the level above, which is right only where a level is filled
+    on every one of those misses. Two policies break that: an exclusive
+    level is filled by the level above rather than from below, and a
+    no-write-allocate level declines write misses outright. ``amat()``
+    then overstates the transfer term and becomes an upper bound, while
+    the hit-time and memory terms stay exact -- which is what makes the
+    gap safe to describe as "the transfer term only".
+    """
+
+    def setUp(self) -> None:
+        rng = random.Random(7)
+        self.stream = [(rng.randrange(4096) * 64, rng.random() < 0.3) for _ in range(20_000)]
+
+    def run_pair(self, kind: str, bus_width: int | None) -> Hierarchy:
+        """Two levels, 2 KB over 8 KB, under one of the two policies."""
+        if kind == "exclusive":
+            levels = [
+                Level(Cache("L1", 2048, 64, 2), 4, bus_width=bus_width),
+                Level(Cache("L2", 8192, 64, 4), 12, inclusion="exclusive", bus_width=bus_width),
+            ]
+        elif kind == "no-write-allocate":
+            levels = [
+                Level(Cache("L1", 2048, 64, 2), 4, write_allocate=False, bus_width=bus_width),
+                Level(Cache("L2", 8192, 64, 4), 12, bus_width=bus_width),
+            ]
+        else:
+            levels = [
+                Level(Cache("L1", 2048, 64, 2), 4, bus_width=bus_width),
+                Level(Cache("L2", 8192, 64, 4), 12, bus_width=bus_width),
+            ]
+        h = Hierarchy(levels, memory_access_time=100)
+        for addr, is_write in self.stream:
+            h.access(addr, is_write)
+        return h
+
+    def test_a_nine_hierarchy_stays_exact_on_the_same_stream(self) -> None:
+        """The control: with the same stream and the same bus, a hierarchy
+        that does fill on every miss matches to the last decimal, so the
+        gap below is the fill behaviour and not the bus."""
+        h = self.run_pair("nine", 16)
+        self.assertGreater(h.levels[1].transfer_cycles, 0)
+        self.assertAlmostEqual(h.amat(), h.measured_amat(), places=9)
+
+    def test_the_gap_appears_only_with_a_bus_width(self) -> None:
+        """Without a transfer term there is nothing to overstate: both
+        policies match measurement exactly, which is the docstring's claim
+        that only the transfer term is approximate."""
+        for kind in ("exclusive", "no-write-allocate"):
+            with self.subTest(kind=kind):
+                h = self.run_pair(kind, None)
+                self.assertEqual([lv.transfer_cycles for lv in h.levels], [0, 0])
+                self.assertAlmostEqual(h.amat(), h.measured_amat(), places=9)
+
+    def test_analytic_amat_is_an_upper_bound_with_a_bus_width(self) -> None:
+        """With a bus, the analytic figure sits strictly above the measured
+        one -- never below, which would understate the cost of a design."""
+        for kind, floor in (("exclusive", 1.0), ("no-write-allocate", 0.5)):
+            with self.subTest(kind=kind):
+                h = self.run_pair(kind, 16)
+                self.assertGreater(h.amat(), h.measured_amat())
+                self.assertGreater(h.amat() - h.measured_amat(), floor)
+
+    def test_the_whole_gap_sits_in_the_transfer_term(self) -> None:
+        """A bus width changes what an access is charged, never which lines
+        are resident, so the miss rates are identical with and without one.
+        The gap is therefore exactly the transfer cycles the formula
+        assumed and the simulation never spent."""
+        for kind in ("exclusive", "no-write-allocate"):
+            with self.subTest(kind=kind):
+                with_bus, without = self.run_pair(kind, 16), self.run_pair(kind, None)
+                self.assertEqual(
+                    [lv.cache.miss_rate for lv in with_bus.levels],
+                    [lv.cache.miss_rate for lv in without.levels],
+                )
+                assumed = with_bus.amat() - without.amat()
+                spent = with_bus.measured_amat() - without.measured_amat()
+                self.assertGreater(assumed, spent)
+                self.assertAlmostEqual(assumed - spent, with_bus.amat() - with_bus.measured_amat())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
