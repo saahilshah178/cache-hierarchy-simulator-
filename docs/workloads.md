@@ -391,7 +391,7 @@ the cache starts empty and 60,000 accesses over 262,144 blocks rarely revisit on
 ### matmul_naive
 
 ```python
-matmul(n=64)          # tile=None: naive i/j/k order
+matmul(n=64)  # tile=None: naive i/j/k order
 ```
 
 C = A x B for 64x64 matrices of doubles in i/j/k loop order, walking B by column.
@@ -566,7 +566,7 @@ starts empty.
 ### cyclic
 
 ```python
-cyclic(blocks=1024, passes=8, block_bytes=64, base=0x0a000000)
+cyclic(blocks=1024, passes=8, block_bytes=64, base=0x0A000000)
 ```
 
 Eight passes over 1024 consecutive 64-byte blocks, one access each: LRU's worst case.

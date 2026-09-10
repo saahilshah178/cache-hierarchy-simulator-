@@ -75,14 +75,16 @@ from cachesim.config import parse_config
 from cachesim.hierarchy import Hierarchy
 from cachesim.reference import RefHierarchy
 
-spec = parse_config({
-    "memory_access_time": 100,
-    "levels": [
-        {"name": "L1", "size": 2048, "block_size": 64, "associativity": 4, "hit_time": 4},
-        {"name": "L2", "size": 16384, "block_size": 64, "associativity": 8, "hit_time": 12},
-        {"name": "L3", "size": 65536, "block_size": 64, "associativity": 16, "hit_time": 40},
-    ],
-})
+spec = parse_config(
+    {
+        "memory_access_time": 100,
+        "levels": [
+            {"name": "L1", "size": 2048, "block_size": 64, "associativity": 4, "hit_time": 4},
+            {"name": "L2", "size": 16384, "block_size": 64, "associativity": 8, "hit_time": 12},
+            {"name": "L3", "size": 65536, "block_size": 64, "associativity": 16, "hit_time": 40},
+        ],
+    }
+)
 rng = random.Random(1)
 stream = [(rng.randrange(1 << 18) & ~7, rng.random() < 0.3) for _ in range(50_000)]
 
