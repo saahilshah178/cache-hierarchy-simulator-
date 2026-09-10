@@ -230,7 +230,8 @@ class NRUPolicy(ReplacementPolicy):
     against LRU's full order -- and is what large, highly associative
     last-level caches and TLBs use, sometimes under the name "clock" or
     "second chance" (Silberschatz, Galvin and Gagne, "Operating System
-    Concepts", 10th ed., 2018, sec. 10.4.5).
+    Concepts", 10th ed., 2018, sec. 10.4.5, "LRU-Approximation Page
+    Replacement").
     """
 
     def __init__(self, num_sets: int, num_ways: int, rng: random.Random | None = None) -> None:
@@ -265,8 +266,9 @@ class LFUPolicy(ReplacementPolicy):
     as long as it stays resident -- the classic weakness of plain LFU, which
     real designs fix by halving all counters periodically or by aging
     (Silberschatz, Galvin and Gagne, "Operating System Concepts", 10th ed.,
-    2018, sec. 10.4.4). Nothing here ages, so ``lfu`` is a faithful model of
-    the textbook policy, cache pollution included.
+    2018, sec. 10.4.6, "Counting-Based Page Replacement", which pairs LFU
+    with its mirror image MFU). Nothing here ages, so ``lfu`` is a faithful
+    model of the textbook policy, cache pollution included.
     """
 
     def __init__(self, num_sets: int, num_ways: int, rng: random.Random | None = None) -> None:
