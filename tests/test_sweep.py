@@ -16,8 +16,10 @@ import os
 import tempfile
 import unittest
 from collections.abc import Iterable
+from dataclasses import replace
 
 from cachesim import plot
+from cachesim.cache import Cache
 from cachesim.config import CacheSpec
 from cachesim.stackdist import per_set_profile
 from cachesim.sweep import (
@@ -28,6 +30,7 @@ from cachesim.sweep import (
     non_monotonic_pairs,
     parse_size,
     parse_values,
+    run_point,
     run_single_level,
     sweep,
     sweep_associativity,
@@ -55,6 +58,12 @@ def base_spec(size: int = 8192, block_size: int = 64, associativity: int = 4) ->
 
 def rates(rows: list[SweepRow]) -> dict[int | str, float]:
     return {row.value: row.miss_rate for row in rows}
+
+
+#: Eight streams aliasing onto every set of a 4-way cache: short enough to
+#: replay many times, and pressured enough that which way is evicted -- and
+#: so which RNG seed the "random" policy drew from -- changes the answer.
+SEED_TRACE = as_accesses(conflict_streams(streams=8, words_per_stream=64))
 
 
 class TestSweepEngine(unittest.TestCase):
@@ -139,6 +148,95 @@ class TestSweepEngine(unittest.TestCase):
             sweep(trace, base_spec(), "size", ["big"])
         with self.assertRaises(ValueError):
             sweep(trace, base_spec(), "policy", ["nope"])
+
+
+class TestSpecIsHonoured(unittest.TestCase):
+    """Every ``CacheSpec`` field reaches the ``Cache`` a sweep point builds.
+
+    A field the engine drops on the floor is invisible: the sweep still
+    prints a full table, it is just the wrong cache. Each test pins a
+    field by making it change the answer, and cross-checks against a
+    ``Cache`` built by hand with the same field.
+    """
+
+    TRACE = SEED_TRACE
+
+    def by_hand(self, spec: CacheSpec) -> Cache:
+        cache = Cache(
+            name=spec.name,
+            size=spec.size,
+            block_size=spec.block_size,
+            associativity=spec.associativity,
+            policy=spec.policy,
+            track_3c=spec.track_3c,
+            rng_seed=spec.rng_seed,
+        )
+        for addr, is_write in self.TRACE:
+            if not cache.probe(addr // spec.block_size, is_write):
+                cache.allocate(addr // spec.block_size, dirty=is_write)
+        return cache
+
+    def test_rng_seed_reaches_the_random_policy(self) -> None:
+        """Two seeds of the "random" policy must give the two seeds' answers."""
+        base = replace(base_spec(size=4096), policy="random")
+        for seed in (1, 2):
+            with self.subTest(seed=seed):
+                spec = replace(base, rng_seed=seed)
+                row = run_point(self.TRACE, spec, "size", 100)
+                self.assertEqual(row.misses, self.by_hand(spec).misses)
+        first, second = (
+            run_point(self.TRACE, replace(base, rng_seed=seed), "size", 100).misses
+            for seed in (1, 2)
+        )
+        self.assertNotEqual(first, second)
+
+    def test_seed_sweeps_are_reproducible_but_not_identical(self) -> None:
+        """A policy sweep at one seed is deterministic; a different seed differs."""
+        base = replace(base_spec(size=4096), rng_seed=7)
+        again = sweep(self.TRACE, base, "policy", ["random"])
+        self.assertEqual(
+            [row.misses for row in sweep(self.TRACE, base, "policy", ["random"])],
+            [row.misses for row in again],
+        )
+        other = sweep(self.TRACE, replace(base, rng_seed=8), "policy", ["random"])
+        self.assertNotEqual(other[0].misses, again[0].misses)
+
+    def test_lru_ignores_the_seed(self) -> None:
+        """LRU draws nothing from the RNG, so the seed must not perturb it."""
+        base = base_spec(size=4096)
+        misses = {
+            run_point(self.TRACE, replace(base, rng_seed=s), "size", 100).misses for s in range(4)
+        }
+        self.assertEqual(len(misses), 1)
+
+    def test_track_3c_off_skips_the_shadow_cache(self) -> None:
+        """Miss counts are unchanged; the columns the shadow feeds go to zero.
+
+        ``conflict`` is ``misses - shadow_misses``, so with no shadow it
+        degenerates to the whole miss count rather than to zero.
+        """
+        base = base_spec(size=4096)
+        on = run_point(self.TRACE, base, "size", 100)
+        off = run_point(self.TRACE, replace(base, track_3c=False), "size", 100)
+        self.assertEqual(off.misses, on.misses)
+        self.assertEqual(off.compulsory, 0)
+        self.assertEqual(off.capacity, 0)
+        self.assertEqual(off.shadow_misses, 0)
+        self.assertEqual(off.conflict, off.misses)
+        self.assertGreater(on.compulsory, 0)
+        self.assertGreater(on.shadow_misses, 0)
+
+    def test_grid_cells_honour_the_spec_too(self) -> None:
+        """The grid shares ``run_point``; pin that it is not bypassed."""
+        base = replace(base_spec(), policy="random")
+        misses = []
+        for seed in (1, 2):
+            grid = sweep_grid(self.TRACE, replace(base, rng_seed=seed), [4096], [4])
+            cell = grid.rows[0][0]
+            self.assertIsNotNone(cell)
+            assert cell is not None  # narrow for mypy; the geometry is feasible
+            misses.append(cell.misses)
+        self.assertNotEqual(misses[0], misses[1])
 
 
 class TestNonMonotonicity(unittest.TestCase):

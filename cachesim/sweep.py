@@ -194,7 +194,20 @@ def _apply(base: CacheSpec, param: str, value: int | str) -> CacheSpec:
 
 
 def run_point(accesses: Accesses, spec: CacheSpec, param: str, mem_time: int) -> SweepRow:
-    """Simulate ``accesses`` through one cache level and snapshot the result."""
+    """Simulate ``accesses`` through one cache level and snapshot the result.
+
+    EVERY field of ``spec`` is honoured, including ``rng_seed`` and
+    ``track_3c``, exactly as ``Hierarchy.from_spec`` honours them: a spec
+    that is silently partly ignored would make a sweep over seeds of the
+    ``random`` policy return identical rows with no error.
+
+    ``track_3c`` defaults to true on ``CacheSpec`` and should normally stay
+    there: with it off the shadow cache never runs, so ``compulsory``,
+    ``capacity`` and ``shadow_misses`` are 0 and ``conflict``, being
+    defined as ``misses - shadow_misses``, degenerates to the total miss
+    count. Turning it off buys about a fifth of the run time (measured on
+    matmul_naive.trace) for a sweep that only wants miss rates and AMAT.
+    """
     try:
         cache = Cache(
             name=spec.name,
@@ -202,6 +215,8 @@ def run_point(accesses: Accesses, spec: CacheSpec, param: str, mem_time: int) ->
             block_size=spec.block_size,
             associativity=spec.associativity,
             policy=spec.policy,
+            track_3c=spec.track_3c,
+            rng_seed=spec.rng_seed,
         )
     except ValueError as exc:
         raise ValueError(f"{param}: {exc}") from None
@@ -238,11 +253,13 @@ def sweep(
 ) -> list[SweepRow]:
     """Replay ``accesses`` once per value of ``param``; one row per value.
 
-    ``base`` supplies the fixed geometry AND the hit time (``base.hit_time``);
-    ``mem_time`` is the memory access time behind the single level. Raises
-    ``ValueError`` naming the parameter if a value produces a geometry that
-    cannot be built, for example a size that is not a multiple of
-    ``block_size * associativity``.
+    ``base`` supplies every field except the one being swept: the fixed
+    geometry, the hit time (``base.hit_time``), the RNG seed
+    (``base.rng_seed``, which is what the ``random`` policy draws from) and
+    ``base.track_3c``. ``mem_time`` is the memory access time behind the
+    single level. Raises ``ValueError`` naming the parameter if a value
+    produces a geometry that cannot be built, for example a size that is
+    not a multiple of ``block_size * associativity``.
     """
     return [run_point(accesses, _apply(base, param, value), param, mem_time) for value in values]
 
