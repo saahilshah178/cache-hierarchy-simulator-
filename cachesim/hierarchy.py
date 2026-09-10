@@ -115,9 +115,28 @@ the access that caused it, and ``amat()`` carries the same term (see its
 docstring). The default, ``null``, is an infinitely wide link and adds
 nothing, so an existing configuration keeps its timing exactly.
 
-A wider block lowers the miss rate but takes longer to move, which is why
-AMAT against block size is a U: at some width the extra transfer time
-overtakes the misses saved.
+A wider block lowers the miss rate but takes longer to move, so AMAT
+against block size need not fall with it: past some width the extra
+transfer time costs more than the misses it saves. Measured on the two
+sample traces through a single 32 KB 4-way level, hit time 4, DRAM 100,
+``bus_width`` 16 (miss rate / measured AMAT, transfer cycles per fill)::
+
+    block   sequential          matmul_naive        transfer
+       16   50.0000% / 54.500    7.1575% / 11.229      1
+       32   25.0000% / 29.500    5.8804% /  9.998      2
+       64   12.5000% / 17.000    5.2419% /  9.452      4
+      128    6.2500% / 10.750    4.9226% /  9.316      8
+      256    3.1250% /  7.625    4.0587% /  8.708     16
+      512    1.5625% /  6.062    3.9288% /  9.186     32
+
+Only ``matmul_naive`` shows the U. A linear scan uses every byte it
+fetches, so its miss rate falls exactly as 1/block and its AMAT is
+``4 + (8/B)*(100 + B/16) = 4 + 800/B + 0.5``, which is monotonically
+decreasing for *any* bus width -- ``sequential`` has no interior minimum
+to find. The trade-off needs imperfect spatial locality: the naive
+matrix multiply strides down B's columns, bottoms out at 256 B and rises
+again at 512 B while its miss rate is still falling. The scan column and
+the rows around that minimum are pinned in ``tests/test_timing.py``.
 
 Every level also counts the bytes it pulls in from below and pushes down,
 and the hierarchy counts DRAM bytes both ways, so a configuration can be

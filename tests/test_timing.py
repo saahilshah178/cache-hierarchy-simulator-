@@ -13,7 +13,7 @@ import unittest
 from cachesim.cache import Cache
 from cachesim.config import ConfigError, parse_config
 from cachesim.hierarchy import Hierarchy, Level
-from cachesim.workloads import matmul
+from cachesim.workloads import matmul, sequential
 
 
 def single(bus_width: int | None, block_size: int = 64) -> Hierarchy:
@@ -232,6 +232,78 @@ class TestBlockSizeTradeoff(unittest.TestCase):
         self.assertEqual(best, 128)
         self.assertLess(amats[128], amats[64])
         self.assertLess(amats[128], amats[256])
+        self.assertLess(amats[256], amats[512])
+
+
+class TestSampleTraceBlockSizeTable(unittest.TestCase):
+    """Pins the block-size table quoted in ``hierarchy``'s module docstring.
+
+    Geometry: one 32 KB 4-way level, hit time 4, ``bus_width`` 16, DRAM
+    100 cycles, block size swept over 16..512 B. The two workloads are the
+    ones behind ``traces/sequential.trace`` and ``traces/matmul_naive.trace``::
+
+        block   sequential          matmul_naive        transfer
+           16   50.0000% / 54.500    7.1575% / 11.229      1
+           32   25.0000% / 29.500    5.8804% /  9.998      2
+           64   12.5000% / 17.000    5.2419% /  9.452      4
+          128    6.2500% / 10.750    4.9226% /  9.316      8
+          256    3.1250% /  7.625    4.0587% /  8.708     16
+          512    1.5625% /  6.062    3.9288% /  9.186     32
+
+    Only the second column is a U. The matmul rows are checked around the
+    minimum only, which is where the claim lives and where the sweep is
+    expensive (532,480 accesses per block size).
+    """
+
+    def point(self, stream: list[tuple[int, bool]], block_size: int) -> tuple[float, float]:
+        """Run the stream through the table's geometry; (miss rate, AMAT)."""
+        h = Hierarchy(
+            [Level(Cache("L1", 32 * 1024, block_size, 4), 4, bus_width=16)],
+            memory_access_time=100,
+        )
+        for addr, is_write in stream:
+            h.access(addr, is_write)
+        self.assertEqual(h.levels[0].transfer_cycles, block_size // 16)
+        self.assertAlmostEqual(h.amat(), h.measured_amat(), places=9)
+        return h.levels[0].cache.miss_rate, h.measured_amat()
+
+    def test_the_sequential_column_is_the_closed_form_and_never_turns(self) -> None:
+        """``sequential`` walks 8-byte words, so a B-byte block absorbs B/8
+        of them and the miss rate is exactly 8/B at every size: AMAT is
+        ``4 + (8/B)*(100 + B/16) = 4 + 800/B + 0.5``. That falls
+        monotonically for any bus width, so this trace can never show the
+        block-size U the transfer term is supposed to produce -- which is
+        why the docstring table carries a second workload."""
+        stream = [(addr, op == "W") for addr, op in sequential()]
+        amats = {}
+        for block_size in (16, 32, 64, 128, 256, 512):
+            miss_rate, amat = self.point(stream, block_size)
+            self.assertAlmostEqual(miss_rate, 8 / block_size, places=10)
+            self.assertAlmostEqual(amat, 4 + (8 / block_size) * (100 + block_size / 16), places=10)
+            amats[block_size] = amat
+        self.assertAlmostEqual(amats[16], 54.5)
+        self.assertAlmostEqual(amats[512], 6.0625)
+        self.assertEqual(sorted(amats, key=lambda b: amats[b])[0], 512)
+
+    def test_the_matmul_naive_column_bottoms_out_at_256_bytes(self) -> None:
+        """The same geometry on the 64x64 naive matrix multiply: the miss
+        rate keeps falling from 128 B to 512 B, but AMAT turns at 256 B
+        because the 32-cycle transfer of a 512 B block costs more than the
+        692 misses it saves."""
+        stream = [(addr, op == "W") for addr, op in matmul(n=64)]
+        rates, amats = {}, {}
+        for block_size in (128, 256, 512):
+            rates[block_size], amats[block_size] = self.point(stream, block_size)
+        for block_size, rate, amat in (
+            (128, 0.0492263, 9.316),
+            (256, 0.0405874, 8.708),
+            (512, 0.0392879, 9.186),
+        ):
+            self.assertAlmostEqual(rates[block_size], rate, places=6)
+            self.assertAlmostEqual(amats[block_size], amat, places=3)
+        self.assertLess(rates[512], rates[256])
+        self.assertLess(rates[256], rates[128])
+        self.assertLess(amats[256], amats[128])
         self.assertLess(amats[256], amats[512])
 
 
