@@ -307,11 +307,16 @@ class Cache:
         self.policy.on_fill(set_idx, way, block)
         return evicted
 
-    def invalidate(self, block: int) -> Evicted | None:
+    def invalidate(self, block: int, count_writeback: bool = True) -> Evicted | None:
         """Remove ``block`` if present. Returns the removed line, else None.
 
-        Counts as an invalidation, not an eviction; a dirty line still
-        counts as a write-back because its data must be written down.
+        Counts as an invalidation, not an eviction; a dirty line also counts
+        as a write-back, because its data must be written down.
+
+        ``count_writeback=False`` suppresses that write-back count, for the
+        one case in which a dirty line leaves a cache without being written
+        towards memory: an exclusive hierarchy moving the line *up* into the
+        level above, which takes the dirty bit with it.
         """
         set_idx = self.set_of(block)
         blocks = self._blocks[set_idx]
@@ -321,7 +326,7 @@ class Cache:
                 blocks[way] = EMPTY
                 self._dirty[set_idx][way] = False
                 self.invalidations += 1
-                if removed.dirty:
+                if removed.dirty and count_writeback:
                     self.writebacks += 1
                 self.policy.on_invalidate(set_idx, way)
                 return removed

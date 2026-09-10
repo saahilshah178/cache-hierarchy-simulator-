@@ -47,9 +47,13 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
     lines.append("")
 
     for i, lv in enumerate(s.levels):
+        # Only features that are switched on appear in the header, so a
+        # default hierarchy reports exactly what it used to.
+        extra = "" if lv.inclusion == "nine" else f", {lv.inclusion} of {s.levels[i - 1].name}"
         lines.append(
             f"--- {lv.name}: {_size_str(lv.size)}, {lv.block_size} B blocks, "
-            f"{lv.associativity}-way, {lv.policy.upper()}, hit time {lv.hit_time} cyc ---"
+            f"{lv.associativity}-way, {lv.policy.upper()}, hit time {lv.hit_time} cyc"
+            f"{extra} ---"
         )
         lines.append(f"  accesses    : {lv.accesses:>12,}")
         lines.append(
@@ -73,6 +77,11 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
             lines.append(
                 f"  writebacks received : {lv.writebacks_received:>6,}"
                 f"   (from {s.levels[i - 1].name}; {lv.writeback_allocations:,} allocated a line)"
+            )
+        if lv.back_invalidations:
+            lines.append(
+                f"  back-invalidated    : {lv.back_invalidations:>6,}"
+                "   (lines dropped because an inclusive level below evicted the block)"
             )
         c3 = lv.three_c
         if c3 is not None and lv.misses:

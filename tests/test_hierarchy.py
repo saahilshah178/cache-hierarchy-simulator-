@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import glob
+import os
 import random
 import unittest
 
 from cachesim.cache import Cache
-from cachesim.config import DEFAULT_CONFIG
+from cachesim.config import DEFAULT_CONFIG, load_config
 from cachesim.hierarchy import Hierarchy, Level
+
+CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs")
 
 
 class TestHierarchy(unittest.TestCase):
@@ -52,6 +56,36 @@ class TestHierarchy(unittest.TestCase):
         for _ in range(20000):
             h.access(rng.randrange(0, 1 << 22), is_write=rng.random() < 0.25)
         self.assertAlmostEqual(h.amat(), h.measured_amat(), places=9)
+
+
+class TestExampleConfigs(unittest.TestCase):
+    """Every config shipped in configs/ must parse and simulate."""
+
+    def config_paths(self) -> list[str]:
+        paths = sorted(glob.glob(os.path.join(CONFIG_DIR, "*.json")))
+        self.assertTrue(paths, f"no configs found in {CONFIG_DIR}")
+        return paths
+
+    def test_every_example_config_parses_and_runs(self) -> None:
+        rng = random.Random(5)
+        stream = [(rng.randrange(0, 1 << 18), rng.random() < 0.3) for _ in range(3000)]
+        for path in self.config_paths():
+            with self.subTest(config=os.path.basename(path)):
+                h = Hierarchy.from_config(load_config(path))
+                for addr, is_write in stream:
+                    h.access(addr, is_write)
+                h.check_inclusion()
+                h.flush()
+                stats = h.stats()
+                self.assertEqual(stats.accesses, len(stream))
+                self.assertGreater(stats.measured_amat, 0.0)
+                self.assertTrue(stats.to_dict())
+
+    def test_default_json_matches_the_built_in_default(self) -> None:
+        from cachesim.config import parse_config
+
+        on_disk = parse_config(load_config(os.path.join(CONFIG_DIR, "default.json")))
+        self.assertEqual(on_disk, parse_config(DEFAULT_CONFIG))
 
 
 class TestWritebackPropagation(unittest.TestCase):

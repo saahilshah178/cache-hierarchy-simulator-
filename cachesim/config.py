@@ -18,6 +18,18 @@ true) and ``rng_seed`` (default 0).
 ``parse_config`` turns such a dict into a ``HierarchySpec`` and rejects
 anything malformed with a ``ConfigError`` whose message names the offending
 key (for example ``levels[1] (L2): unknown key 'assoc'``).
+
+Every key beyond the five required ones has a default that reproduces the
+original model exactly, so an old configuration keeps its old behaviour:
+
+======================  =============  ==================================
+key                     default        effect
+======================  =============  ==================================
+``policy``              ``"lru"``      replacement policy
+``track_3c``            ``true``       run the 3-C shadow cache
+``rng_seed``            ``0``          seed for the random policy
+``inclusion``           ``"nine"``     relation to the level ABOVE
+======================  =============  ==================================
 """
 
 from __future__ import annotations
@@ -36,9 +48,34 @@ class ConfigError(ValueError):
     """A configuration is structurally or semantically invalid."""
 
 
+#: Inclusion policies a level may declare towards the level ABOVE it.
+#:
+#: nine
+#:     Non-Inclusive Non-Exclusive: nothing is enforced between the two
+#:     levels. A fill installs the block in every level that missed, and no
+#:     level is told when another evicts. This is the default and the
+#:     behaviour of the original model.
+#: inclusive
+#:     The level is a superset of the level above: whenever it drops a block
+#:     the block is back-invalidated from every level above it.
+#: exclusive
+#:     The level holds only blocks that the level above does not: it is
+#:     filled by the level above's evictions and emptied when the level
+#:     above pulls a block back up (Jouppi's victim-cache arrangement,
+#:     generalised to a whole level).
+#:
+#: The terminology follows Baer and Wang, "On the Inclusion Properties for
+#: Multi-Level Cache Hierarchies", ISCA 1988.
+INCLUSION_POLICIES = ("nine", "inclusive", "exclusive")
+
+
 @dataclass(frozen=True)
 class CacheSpec:
-    """Parameters of one cache level."""
+    """Parameters of one cache level.
+
+    ``inclusion`` describes this level's relation to the level ABOVE it (see
+    ``INCLUSION_POLICIES``), so the first level must leave it at ``"nine"``.
+    """
 
     name: str
     size: int
@@ -49,6 +86,7 @@ class CacheSpec:
     track_3c: bool = True
     rng_seed: int = 0
     index: str = DEFAULT_INDEX
+    inclusion: str = "nine"
 
 
 @dataclass(frozen=True)
@@ -168,6 +206,15 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
             f"{where}: unknown index function {index!r}; "
             f"choose from {', '.join(sorted(INDEX_FUNCTIONS))}"
         )
+    inclusion = spec.get("inclusion", "nine")
+    if not isinstance(inclusion, str):
+        raise ConfigError(f"{where}: 'inclusion' must be a string, got {inclusion!r}")
+    inclusion = inclusion.lower()
+    if inclusion not in INCLUSION_POLICIES:
+        raise ConfigError(
+            f"{where}: unknown inclusion policy {inclusion!r}; "
+            f"choose from {', '.join(INCLUSION_POLICIES)}"
+        )
 
     return CacheSpec(
         name=name,
@@ -179,6 +226,7 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
         track_3c=track_3c,
         rng_seed=_require_int(where, "rng_seed", spec.get("rng_seed", 0), -(1 << 63)),
         index=index,
+        inclusion=inclusion,
     )
 
 
@@ -217,6 +265,11 @@ def parse_config(config: Mapping[str, Any]) -> HierarchySpec:
         # advance; see cachesim.opt.simulate_with_opt.
         raise ConfigError(
             f"policy 'opt' is only meaningful at one level, but {', '.join(offline)} all ask for it"
+        )
+    if levels[0].inclusion != "nine":
+        raise ConfigError(
+            f"levels[0] ({levels[0].name}): 'inclusion' describes a level's relation to the "
+            f"level above it, and the first level has none; got {levels[0].inclusion!r}"
         )
     block_sizes = {level.block_size for level in levels}
     if len(block_sizes) != 1:

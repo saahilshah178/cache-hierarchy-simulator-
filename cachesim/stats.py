@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from cachesim.hierarchy import Hierarchy
 
-SCHEMA_VERSION = 1
+#: Bumped to 2 when the hierarchy gained inclusion policies, per-level write
+#: policies, transfer-time and byte accounting, prefetchers, and the DRAM
+#: row-buffer model; every one of those added fields to this snapshot.
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,7 @@ class LevelStats:
     num_sets: int
     policy: str
     hit_time: int
+    inclusion: str
     accesses: int
     hits: int
     misses: int
@@ -57,6 +61,7 @@ class LevelStats:
     writebacks: int
     writebacks_received: int
     writeback_allocations: int
+    back_invalidations: int
     three_c: ThreeCStats | None
 
 
@@ -106,6 +111,7 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
                 num_sets=c.num_sets,
                 policy=c.policy_name,
                 hit_time=level.hit_time,
+                inclusion=level.inclusion,
                 accesses=c.accesses,
                 hits=c.hits,
                 misses=c.misses,
@@ -121,6 +127,7 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
                 writebacks=c.writebacks,
                 writebacks_received=c.writebacks_received,
                 writeback_allocations=c.writeback_allocations,
+                back_invalidations=level.back_invalidations,
                 three_c=three_c,
             )
         )

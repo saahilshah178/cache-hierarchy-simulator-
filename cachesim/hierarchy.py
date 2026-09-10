@@ -22,14 +22,57 @@ Modelling choices:
   memory access time if everything missed. Write-back traffic is counted
   (``Cache.writebacks``, ``Hierarchy.dram_writes``) but not charged time,
   as if fully absorbed by write buffers.
-* Levels are non-inclusive, non-exclusive (NINE): a fill installs the
-  block in every level that missed, but nothing keeps the levels
-  consistent afterwards, so a lower level may evict a line that an upper
-  level still holds.
+* Each level declares an ``inclusion`` policy describing its relation to
+  the level above it (see below). The default is NINE, which enforces
+  nothing.
 
 The model is functional (exact hit/miss/eviction behaviour) with a serial,
 fixed-latency timing model; it does not model overlap of misses (MSHRs),
 DRAM banks, or bandwidth.
+
+Inclusion policies
+------------------
+
+``inclusion`` is declared on the LOWER level of a pair and names the
+relation it maintains with the level above it (Baer and Wang, "On the
+Inclusion Properties for Multi-Level Cache Hierarchies", ISCA 1988):
+
+nine
+    Non-inclusive non-exclusive: fills install the block in every level
+    that missed and nothing is enforced afterwards, so a lower level may
+    drop a block an upper level still holds. This is the default.
+
+inclusive
+    The level is a superset of the level above. Whenever it drops a block
+    -- replacement by a demand fill, replacement by a write-back
+    allocation, or an invalidation -- the block is *back-invalidated* out
+    of every level above it. A dirty copy found above is written to the
+    level BELOW the evicting level (or to DRAM), because the evicting
+    level is losing the block too and cannot hold the data. Back-
+    invalidation is what makes an inclusive last level able to filter
+    coherence traffic on behalf of the whole hierarchy, and it is also why
+    an inclusive level that is not much larger than the level above it
+    destroys upper-level hits.
+
+exclusive
+    The level holds only blocks the level above does not, as a victim
+    cache for it:
+
+    * A demand fetch passing through the level does not fill it; only the
+      level above is filled.
+    * A hit here moves the block UP: it is invalidated here (carrying its
+      dirty bit with it) and allocated in the level above.
+    * Every line the level above evicts, clean or dirty, is allocated
+      here. This replaces the dirty-only write-back across that boundary.
+      The insertion may evict a line here, which is handled by this
+      level's own rule: written back if dirty, or passed on to the next
+      exclusive level.
+
+    Total capacity is the sum of the two levels rather than the larger of
+    them, at the cost of moving every victim across the boundary.
+
+``check_inclusion()`` asserts the invariant for every adjacent pair and is
+meant to be called from tests after a random access stream.
 
 AMAT (average memory access time) is the headline metric:
 
@@ -37,7 +80,9 @@ AMAT (average memory access time) is the headline metric:
 
 where L1's miss penalty is itself the AMAT of the rest of the hierarchy, so
 the formula nests. Both the analytic value and the measured average
-(total simulated cycles / accesses) are reported.
+(total simulated cycles / accesses) are reported. They agree exactly for an
+allocate-on-miss NINE hierarchy, because every level's access count is then
+the level above's miss count.
 """
 
 from __future__ import annotations
@@ -51,11 +96,37 @@ from cachesim.stats import HierarchyStats, collect
 
 
 class Level:
-    """A cache plus the time (in cycles) it costs to probe it."""
+    """A cache, the cycles it costs to probe it, and its relation to the
+    level above.
 
-    def __init__(self, cache: Cache, hit_time: int) -> None:
+    Parameters
+    ----------
+    cache     : the cache at this level.
+    hit_time  : cycles charged for probing this level, hit or miss.
+    inclusion : "nine" (default), "inclusive", or "exclusive"; see the
+                module docstring. It constrains this level against the one
+                ABOVE it, so the first level of a hierarchy must be "nine".
+    """
+
+    def __init__(self, cache: Cache, hit_time: int, inclusion: str = "nine") -> None:
+        if inclusion not in ("nine", "inclusive", "exclusive"):
+            raise ValueError(f"{cache.name}: unknown inclusion policy {inclusion!r}")
         self.cache = cache
         self.hit_time = hit_time
+        self.inclusion = inclusion
+        #: True if this level must stay a superset of the level above.
+        self.inclusive = inclusion == "inclusive"
+        #: True if this level must stay disjoint from the level above.
+        self.exclusive = inclusion == "exclusive"
+
+        #: Lines removed from this level because an inclusive level below it
+        #: evicted the block (back-invalidations received, not sent).
+        self.back_invalidations = 0
+
+    def reset_stats(self) -> None:
+        """Zero this level's counters, including the cache's."""
+        self.back_invalidations = 0
+        self.cache.reset_stats()
 
 
 class Hierarchy:
@@ -73,9 +144,17 @@ class Hierarchy:
         block_sizes = {level.cache.block_size for level in levels}
         if len(block_sizes) != 1:
             raise ValueError(f"all levels must share one block size, got {sorted(block_sizes)}")
+        if levels[0].inclusion != "nine":
+            raise ValueError(
+                f"{levels[0].cache.name}: the first level has no level above it, so its "
+                f"inclusion policy must be 'nine', got {levels[0].inclusion!r}"
+            )
         self.levels = levels
         self.block_size = levels[0].cache.block_size
         self.memory_access_time = memory_access_time
+        # Precomputed so the access path can skip work no level asks for.
+        self._has_exclusive = any(level.exclusive for level in levels)
+        self._has_inclusive = any(level.inclusive for level in levels)
 
         # --- statistics ---
         self.accesses = 0
@@ -105,7 +184,7 @@ class Hierarchy:
                 )
             except ValueError as exc:
                 raise ConfigError(str(exc)) from None
-            levels.append(Level(cache, level.hit_time))
+            levels.append(Level(cache, level.hit_time, inclusion=level.inclusion))
         return cls(levels, spec.memory_access_time)
 
     @classmethod
@@ -126,7 +205,9 @@ class Hierarchy:
 
         The access probes levels top-down until one hits (or DRAM is
         reached), then fills the block into every level that missed,
-        bottom-up, handling each eviction those fills cause.
+        bottom-up, handling each eviction those fills cause. Exclusive
+        levels are not filled by the fetch; a block that hit in one is
+        moved out of it and up instead.
         """
         if addr < 0:
             raise ValueError(f"address must be non-negative, got {addr}")
@@ -153,9 +234,27 @@ class Hierarchy:
             time += self.memory_access_time
             self.dram_reads += 1
 
+        dirty = is_write
+        if self._has_exclusive and hit_level > 0 and hit_level < len(levels):
+            # An exclusive level does not keep a block the level above is
+            # about to hold: the block moves up, dirty bit and all.
+            level = levels[hit_level]
+            if level.exclusive:
+                removed = level.cache.invalidate(block, count_writeback=False)
+                if removed is not None and removed.dirty:
+                    dirty = True
+
         # Fill the block into every level above the one that supplied it.
+        # The topmost level filled takes the dirty bit; exclusive levels are
+        # filled only by the evictions of the level above them.
+        top = 0
+        if self._has_exclusive:
+            while top < hit_level and levels[top].exclusive:
+                top += 1
         for i in range(hit_level - 1, -1, -1):
-            evicted = levels[i].cache.allocate(block, dirty=is_write and i == 0)
+            if self._has_exclusive and levels[i].exclusive:
+                continue
+            evicted = levels[i].cache.allocate(block, dirty=dirty and i == top)
             if evicted is not None:
                 self._handle_eviction(i, evicted)
 
@@ -163,9 +262,51 @@ class Hierarchy:
         return time
 
     def _handle_eviction(self, level_index: int, evicted: Evicted) -> None:
-        """React to a line leaving ``levels[level_index]``: write it back if dirty."""
-        if evicted.dirty:
-            self._write_back(level_index + 1, evicted.block)
+        """React to a line leaving ``levels[level_index]``.
+
+        A line that leaves a level goes somewhere:
+
+        * into the next level down, if that level is exclusive -- clean or
+          dirty, because an exclusive level is exactly the victim buffer of
+          the level above it;
+        * otherwise down as a write-back if it is dirty, and nowhere at all
+          if it is clean.
+
+        If this level is inclusive it then back-invalidates the block out of
+        every level above it, which may send a further, more recent copy of
+        the data down past this level.
+        """
+        below = level_index + 1
+        if self._has_exclusive and below < len(self.levels) and self.levels[below].exclusive:
+            cache = self.levels[below].cache
+            if evicted.dirty:
+                cache.writebacks_received += 1
+                cache.writeback_allocations += 1
+            passed_on = cache.allocate(evicted.block, dirty=evicted.dirty)
+            if passed_on is not None:
+                self._handle_eviction(below, passed_on)
+        elif evicted.dirty:
+            self._write_back(below, evicted.block)
+        if self.levels[level_index].inclusive:
+            self._back_invalidate(level_index, evicted.block)
+
+    def _back_invalidate(self, level_index: int, block: int) -> None:
+        """Remove ``block`` from every level above an inclusive ``levels[level_index]``.
+
+        Walked from the level closest to ``level_index`` upwards, so that if
+        several levels somehow hold dirty copies the one closest to the core
+        -- the most recent -- is written down last and wins. A dirty copy
+        goes to the level BELOW the evicting level, since that level is
+        losing the block on this same eviction.
+        """
+        for i in range(level_index - 1, -1, -1):
+            level = self.levels[i]
+            removed = level.cache.invalidate(block)
+            if removed is None:
+                continue
+            level.back_invalidations += 1
+            if removed.dirty:
+                self._write_back(level_index + 1, block)
 
     def _write_back(self, level_index: int, block: int) -> None:
         """Deliver a dirty block to ``levels[level_index]`` (or DRAM past the end).
@@ -206,6 +347,37 @@ class Hierarchy:
                     self._write_back(i + 1, block)
         return self.dram_writes - before
 
+    def check_inclusion(self) -> None:
+        """Assert the inclusion invariant of every adjacent pair of levels.
+
+        Raises ``AssertionError`` naming the offending block if an inclusive
+        level is missing a block held above it, or if an exclusive level
+        shares a block with the level above it. NINE pairs are unconstrained
+        and always pass. Intended for tests: run a random access stream
+        through the hierarchy and then call this.
+        """
+        for i in range(1, len(self.levels)):
+            level = self.levels[i]
+            if level.inclusion == "nine":
+                continue
+            upper = self.levels[i - 1].cache
+            lower = level.cache
+            upper_blocks = {block for _, _, block, _ in upper.lines()}
+            if level.inclusive:
+                missing = sorted(b for b in upper_blocks if not lower.contains(b))
+                if missing:
+                    raise AssertionError(
+                        f"{lower.name} is inclusive of {upper.name} but does not hold "
+                        f"{len(missing)} block(s) it caches, e.g. {missing[:8]}"
+                    )
+            else:
+                shared = sorted(b for b in upper_blocks if lower.contains(b))
+                if shared:
+                    raise AssertionError(
+                        f"{lower.name} is exclusive of {upper.name} but shares "
+                        f"{len(shared)} block(s) with it, e.g. {shared[:8]}"
+                    )
+
     def reset_stats(self) -> None:
         """Zero every counter at every level while keeping cache contents.
 
@@ -216,7 +388,7 @@ class Hierarchy:
         self.dram_reads = self.dram_writes = 0
         self.total_time = 0
         for level in self.levels:
-            level.cache.reset_stats()
+            level.reset_stats()
 
     # -- metrics -------------------------------------------------------------
 
