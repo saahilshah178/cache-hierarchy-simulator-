@@ -250,6 +250,14 @@ class Cache:
         self._on_probe: Callable[[int, int], None] | None = (
             self.policy.on_probe if self.policy.sees_references else None
         )
+        # The three hooks the hot path calls, bound once for the same reason:
+        # ``self.policy`` is set here and never reassigned (nothing outside
+        # this constructor writes it), so a bound method cannot go stale, and
+        # every probe and fill saves an attribute lookup. ``self.policy``
+        # remains the API; these are only a faster spelling of it.
+        self._on_hit = self.policy.on_hit
+        self._on_fill = self.policy.on_fill
+        self._on_invalidate = self.policy.on_invalidate
 
         # Cache contents, indexed [set][way]: the block number held in each
         # way (EMPTY for an invalid way), its dirty bit, and whether a
@@ -332,19 +340,29 @@ class Cache:
             on_probe(set_idx, block)
         blocks = self._blocks[set_idx]
         # At most ``ways`` comparisons, like the parallel tag comparators of
-        # real hardware.
-        for way in range(self.associativity):
-            if blocks[way] == block:
-                self.hits += 1
-                if is_write:
-                    self.write_hits += 1
-                    self._dirty[set_idx][way] = True
-                else:
-                    self.read_hits += 1
-                self.policy.on_hit(set_idx, way, block)
-                if self.track_3c and not self._update_shadow(block):
+        # real hardware -- and, like them, all at once: ``in`` and ``index``
+        # scan the set in C, where a Python loop over the ways pays an
+        # interpreter step per comparator. Two scans of a set of four to
+        # sixteen small integers still cost a third of one Python loop.
+        if block in blocks:
+            way = blocks.index(block)
+            self.hits += 1
+            if is_write:
+                self.write_hits += 1
+                self._dirty[set_idx][way] = True
+            else:
+                self.read_hits += 1
+            self._on_hit(set_idx, way, block)
+            if self.track_3c:
+                # The shadow cache almost always holds a block the real
+                # cache just hit, and that case is three operations; the
+                # rest stays in _update_shadow, which owns the miss half.
+                shadow = self._shadow
+                if block in shadow:
+                    shadow.move_to_end(block)
+                elif not self._update_shadow(block):
                     self.anti_conflict_hits += 1
-                return True
+            return True
 
         if self.victim is not None:
             line = self.victim.take(block)
@@ -395,15 +413,15 @@ class Cache:
         dirty_bits = self._dirty[set_idx]
         prefetched_bits = self._prefetched[set_idx]
 
-        way = EMPTY
-        for w in range(self.associativity):
-            held = blocks[w]
-            if held == block:
-                if dirty:
-                    dirty_bits[w] = True
-                return None
-            if held == EMPTY and way == EMPTY:
-                way = w
+        # Two C-level scans in place of one Python loop over the ways: the
+        # block itself first (already resident is a no-op), then the lowest
+        # empty way, which is the way the loop used to remember. EMPTY is
+        # also the "no empty way" sentinel, since it is not a valid way.
+        if block in blocks:
+            if dirty:
+                dirty_bits[blocks.index(block)] = True
+            return None
+        way = blocks.index(EMPTY) if EMPTY in blocks else EMPTY
         evicted = None
         if way == EMPTY:
             way = self.policy.victim(set_idx)
@@ -418,7 +436,7 @@ class Cache:
         dirty_bits[way] = dirty
         prefetched_bits[way] = prefetched
         self.fills += 1
-        self.policy.on_fill(set_idx, way, block)
+        self._on_fill(set_idx, way, block)
         return evicted
 
     def invalidate(self, block: int, count_writeback: bool = True) -> Evicted | None:
@@ -432,19 +450,22 @@ class Cache:
         towards memory: an exclusive hierarchy moving the line *up* into the
         level above, which takes the dirty bit with it.
         """
-        set_idx = self.set_of(block)
+        index = self._index_fn
+        set_idx = block % self.num_sets if index is None else index(block)
         blocks = self._blocks[set_idx]
-        for way in range(self.associativity):
-            if blocks[way] == block:
-                removed = Evicted(block, self._dirty[set_idx][way], self._prefetched[set_idx][way])
-                blocks[way] = EMPTY
-                self._dirty[set_idx][way] = False
-                self._prefetched[set_idx][way] = False
-                self.invalidations += 1
-                if removed.dirty and count_writeback:
-                    self.writebacks += 1
-                self.policy.on_invalidate(set_idx, way)
-                return removed
+        if block in blocks:
+            way = blocks.index(block)
+            dirty_bits = self._dirty[set_idx]
+            prefetched_bits = self._prefetched[set_idx]
+            removed = Evicted(block, dirty_bits[way], prefetched_bits[way])
+            blocks[way] = EMPTY
+            dirty_bits[way] = False
+            prefetched_bits[way] = False
+            self.invalidations += 1
+            if removed.dirty and count_writeback:
+                self.writebacks += 1
+            self._on_invalidate(set_idx, way)
+            return removed
         if self.victim is not None:
             buffered = self.victim.take(block)
             if buffered is not None:
@@ -480,9 +501,8 @@ class Cache:
         """True if ``block`` is resident and dirty."""
         set_idx = self.set_of(block)
         blocks = self._blocks[set_idx]
-        for way in range(self.associativity):
-            if blocks[way] == block:
-                return self._dirty[set_idx][way]
+        if block in blocks:
+            return self._dirty[set_idx][blocks.index(block)]
         if self.victim is not None:
             line = self.victim.peek(block)
             if line is not None:
@@ -491,12 +511,12 @@ class Cache:
 
     def mark_dirty(self, block: int) -> bool:
         """Set the dirty bit of a resident block. Returns False if absent."""
-        set_idx = self.set_of(block)
+        index = self._index_fn
+        set_idx = block % self.num_sets if index is None else index(block)
         blocks = self._blocks[set_idx]
-        for way in range(self.associativity):
-            if blocks[way] == block:
-                self._dirty[set_idx][way] = True
-                return True
+        if block in blocks:
+            self._dirty[set_idx][blocks.index(block)] = True
+            return True
         if self.victim is not None:
             line = self.victim.peek(block)
             if line is not None:
@@ -508,9 +528,8 @@ class Cache:
         since a prefetcher installed it."""
         set_idx = self.set_of(block)
         blocks = self._blocks[set_idx]
-        for way in range(self.associativity):
-            if blocks[way] == block:
-                return self._prefetched[set_idx][way]
+        if block in blocks:
+            return self._prefetched[set_idx][blocks.index(block)]
         if self.victim is not None:
             line = self.victim.peek(block)
             if line is not None:
@@ -525,12 +544,12 @@ class Cache:
         """
         set_idx = self.set_of(block)
         blocks = self._blocks[set_idx]
-        prefetched_bits = self._prefetched[set_idx]
-        for way in range(self.associativity):
-            if blocks[way] == block:
-                was_set = prefetched_bits[way]
-                prefetched_bits[way] = False
-                return was_set
+        if block in blocks:
+            way = blocks.index(block)
+            prefetched_bits = self._prefetched[set_idx]
+            was_set = prefetched_bits[way]
+            prefetched_bits[way] = False
+            return was_set
         if self.victim is not None:
             line = self.victim.peek(block)
             if line is not None and line.prefetched:
@@ -542,10 +561,9 @@ class Cache:
         """Clear the dirty bit of a resident block. Returns False if absent."""
         set_idx = self.set_of(block)
         blocks = self._blocks[set_idx]
-        for way in range(self.associativity):
-            if blocks[way] == block:
-                self._dirty[set_idx][way] = False
-                return True
+        if block in blocks:
+            self._dirty[set_idx][blocks.index(block)] = False
+            return True
         if self.victim is not None:
             line = self.victim.peek(block)
             if line is not None:
