@@ -23,12 +23,12 @@ from cachesim.invariants import CheckReport, check_hierarchy, check_invariants
 
 # Importing cachesim.opt registers the offline "opt" policy in POLICIES, so
 # that a config or a --policy flag can name it wherever the package is used.
-from cachesim.opt import OPTPolicy, opt_misses, run_opt, simulate_with_opt
+from cachesim.opt import OPTPolicy, opt_misses, run_opt, simulate_with_opt, uses_opt
 from cachesim.policies import POLICIES, ReplacementPolicy
 from cachesim.prefetch import PREFETCHER_NAMES, PREFETCHERS, Prefetcher, make_prefetcher
 from cachesim.report import build_report, format_report, print_report
 from cachesim.stats import HierarchyStats, LevelStats, MemoryStats, ThreeCStats
-from cachesim.trace import parse_trace
+from cachesim.trace import load_trace, parse_trace
 
 __version__ = "0.9.0"
 
@@ -91,7 +91,12 @@ def run_trace(
     selects the trace format and defaults to choosing it by extension; see
     ``cachesim.trace``.
     """
-    hierarchy = Hierarchy.from_config(config or DEFAULT_CONFIG)
+    spec = parse_config(config or DEFAULT_CONFIG)
+    if uses_opt(spec):
+        # Belady's OPT needs the whole reference stream before it can
+        # decide anything, so the trace is loaded and replayed twice.
+        return simulate_with_opt(load_trace(trace_path, fmt), spec, warmup=warmup)
+    hierarchy = Hierarchy.from_spec(spec)
     accesses = parse_trace(trace_path, fmt)
     if warmup > 0:
         for n, (addr, is_write) in enumerate(accesses, start=1):

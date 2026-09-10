@@ -41,8 +41,8 @@ from heapq import heappop, heappush
 from typing import Any
 
 from cachesim.cache import EMPTY, Cache
-from cachesim.config import ConfigError, HierarchySpec, parse_config
-from cachesim.hierarchy import Hierarchy, Level
+from cachesim.config import CacheSpec, ConfigError, HierarchySpec, parse_config
+from cachesim.hierarchy import Hierarchy
 from cachesim.policies import POLICIES, ReplacementPolicy
 
 #: The name ``OPTPolicy`` registers itself under in ``POLICIES``.
@@ -253,15 +253,17 @@ def run_opt(
 class _ProbeRecorder(Cache):
     """An LRU cache that also records the block of every probe it receives."""
 
-    def __init__(self, name: str, size: int, block_size: int, associativity: int, index: str):
+    def __init__(self, spec: CacheSpec) -> None:
         super().__init__(
-            name,
-            size,
-            block_size,
-            associativity,
+            spec.name,
+            spec.size,
+            spec.block_size,
+            spec.associativity,
             policy="lru",
             track_3c=False,
-            index=index,
+            rng_seed=spec.rng_seed,
+            index=spec.index,
+            victim_entries=spec.victim_cache,
         )
         self.probed: list[int] = []
 
@@ -286,18 +288,51 @@ def _opt_level(spec: HierarchySpec) -> int:
             "reference stream a second OPT level would need cannot be recorded in "
             "advance"
         )
-    return levels[0]
+    index = levels[0]
+    target = spec.levels[index]
+    # The recorded stream is only exact if nothing L does can change what
+    # the levels above it hold. An inclusive or exclusive L moves or
+    # invalidates lines above it, and an inclusive level below L
+    # back-invalidates L and everything above it.
+    if target.inclusion != "nine":
+        raise ConfigError(
+            f"{target.name}: policy {OPT!r} needs inclusion 'nine', got {target.inclusion!r}; "
+            "an inclusive or exclusive level changes the levels above it, so its reference "
+            "stream cannot be recorded in advance"
+        )
+    below = [level.name for level in spec.levels[index + 1 :] if level.inclusion == "inclusive"]
+    if below:
+        raise ConfigError(
+            f"{target.name}: policy {OPT!r} cannot sit above an inclusive level "
+            f"({', '.join(below)}); back-invalidations from below would change the "
+            "reference stream between the recording pass and the OPT pass"
+        )
+    return index
 
 
 def simulate_with_opt(
     trace_accesses: Sequence[tuple[int, bool]],
     config: Mapping[str, Any] | HierarchySpec,
+    warmup: int = 0,
 ) -> Hierarchy:
     """Run a hierarchy with Belady's OPT at the one level that asks for it.
 
     ``config`` is a configuration dict (or an already parsed
     ``HierarchySpec``) in which exactly one level has ``"policy": "opt"``;
     anything else is a ``ConfigError``. Returns the finished ``Hierarchy``.
+    ``warmup`` accesses are simulated before the statistics are reset, as
+    in ``run_trace``; OPT still sees the whole stream, so the warm-up
+    prefix is part of the future it optimises against.
+
+    The OPT level keeps every other setting it was given (index function,
+    victim buffer, write policy, bus width, prefetcher). Inclusion is the
+    one thing it cannot combine with: the OPT level itself must be NINE
+    and no level below it may be inclusive, because either would let the
+    OPT level's replacement decisions change what the levels above it
+    hold, and with that the very stream being recorded. ``_opt_level``
+    rejects such configurations up front; the OPT policy also verifies
+    the replayed stream reference by reference and raises ``RuntimeError``
+    on the first mismatch, so a wrong bound is never reported silently.
 
     Two passes are needed because OPT has to know the reference stream of
     the level it runs at, and that stream is not the trace: an access
@@ -343,10 +378,11 @@ def simulate_with_opt(
         for i, level in enumerate(spec.levels)
     )
     first = Hierarchy.from_spec(replace(spec, levels=lru_levels))
-    recorder = _ProbeRecorder(
-        target.name, target.size, target.block_size, target.associativity, target.index
-    )
-    first.levels[level_index] = Level(recorder, target.hit_time)
+    # Swap only the cache so the Level keeps its bus width, prefetcher,
+    # inclusion and write settings; the hierarchy reads the cache through
+    # the level on every access, so the swap is seen immediately.
+    recorder = _ProbeRecorder(target)
+    first.levels[level_index].cache = recorder
     for addr, is_write in trace_accesses:
         first.access(addr, is_write)
 
@@ -356,6 +392,15 @@ def simulate_with_opt(
     if not isinstance(policy, OPTPolicy):  # pragma: no cover - registry sanity
         raise TypeError(f"policy {OPT!r} is not OPTPolicy but {type(policy).__name__}")
     policy.preload(recorder.probed)
-    for addr, is_write in trace_accesses:
+    for n, (addr, is_write) in enumerate(trace_accesses):
+        if n == warmup > 0:
+            hierarchy.reset_stats()
         hierarchy.access(addr, is_write)
+    if 0 < len(trace_accesses) <= warmup:
+        hierarchy.reset_stats()  # the warm-up swallowed the whole trace
     return hierarchy
+
+
+def uses_opt(spec: HierarchySpec) -> bool:
+    """True if any level of ``spec`` asks for the offline OPT policy."""
+    return any(level.policy == OPT for level in spec.levels)

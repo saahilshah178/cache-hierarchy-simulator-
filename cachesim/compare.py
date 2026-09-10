@@ -42,8 +42,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from cachesim.cliargs import load_trace, non_negative_int
-from cachesim.config import ConfigError, default_config, load_config
+from cachesim.config import ConfigError, default_config, load_config, parse_config
 from cachesim.hierarchy import Hierarchy
+from cachesim.opt import simulate_with_opt, uses_opt
 from cachesim.stats import HierarchyStats
 
 #: ``--config default`` means the built-in hierarchy rather than a file.
@@ -79,7 +80,10 @@ def simulate(accesses: Accesses, config: Mapping[str, Any], warmup: int = 0) -> 
     the reported figures describe steady state rather than cold caches. The
     cache contents survive the reset; see ``Hierarchy.reset_stats``.
     """
-    hierarchy = Hierarchy.from_config(config)
+    spec = parse_config(config)
+    if uses_opt(spec):
+        return simulate_with_opt(list(accesses), spec, warmup=warmup).stats()
+    hierarchy = Hierarchy.from_spec(spec)
     reset = warmup <= 0
     for index, (addr, is_write) in enumerate(accesses):
         if not reset and index == warmup:

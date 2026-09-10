@@ -301,3 +301,113 @@ class TestSimulateWithOpt(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestOptThroughTheFrontDoor(unittest.TestCase):
+    """A configuration with an OPT level works wherever a configuration does."""
+
+    def setUp(self) -> None:
+        import os
+        import tempfile
+
+        from cachesim.workloads import write_trace
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        rng = random.Random(11)
+        self.accesses = [(rng.randrange(300) * 64, rng.random() < 0.3) for _ in range(3000)]
+        self.trace = os.path.join(self._tmp.name, "t.trace")
+        write_trace(self.trace, ((a, "W" if w else "R") for a, w in self.accesses))
+        self.dir = self._tmp.name
+
+    def config(self, opt_at: str, **l1_extra: object) -> dict[str, object]:
+        l1: dict[str, object] = {
+            "name": "L1",
+            "size": 1024,
+            "block_size": 64,
+            "associativity": 2,
+            "hit_time": 4,
+            "policy": "opt" if opt_at == "L1" else "lru",
+            **l1_extra,
+        }
+        l2: dict[str, object] = {
+            "name": "L2",
+            "size": 4096,
+            "block_size": 64,
+            "associativity": 4,
+            "hit_time": 12,
+            "policy": "opt" if opt_at == "L2" else "lru",
+        }
+        return {"memory_access_time": 100, "levels": [l1, l2]}
+
+    def test_run_trace_uses_the_two_pass_driver(self) -> None:
+        from cachesim import run_trace
+
+        via_run = run_trace(self.trace, self.config("L2"))
+        direct = simulate_with_opt(self.accesses, self.config("L2"))
+        self.assertEqual(via_run.stats().to_dict(), direct.stats().to_dict())
+        self.assertEqual(via_run.levels[1].cache.policy_name, "opt")
+
+    def test_opt_at_l1_equals_the_single_level_optimum(self) -> None:
+        """L1 sees the trace itself, so OPT there is exactly run_opt on it."""
+        from cachesim import run_trace
+
+        hierarchy = run_trace(self.trace, self.config("L1"))
+        alone = run_opt(self.accesses, 1024, 64, 2)
+        self.assertEqual(hierarchy.levels[0].cache.misses, alone.misses)
+        self.assertGreater(alone.misses, 0)
+
+    def test_warmup_resets_the_counters_but_not_the_future(self) -> None:
+        from cachesim import run_trace
+
+        warm = run_trace(self.trace, self.config("L2"), warmup=1000)
+        cold = run_trace(self.trace, self.config("L2"))
+        self.assertEqual(warm.accesses, 2000)
+        self.assertLessEqual(warm.levels[1].cache.misses, cold.levels[1].cache.misses)
+        swallowed = run_trace(self.trace, self.config("L2"), warmup=10_000)
+        self.assertEqual(swallowed.accesses, 0)
+
+    def test_the_opt_level_keeps_its_other_settings(self) -> None:
+        from cachesim import run_trace
+
+        hierarchy = run_trace(self.trace, self.config("L1", victim_cache=4, index="xor"))
+        l1 = hierarchy.levels[0].cache
+        self.assertIsNotNone(l1.victim)
+        self.assertEqual(l1.index_name, "xor")
+        self.assertEqual(hierarchy.accesses, 3000)
+
+    def test_inclusion_restrictions_are_rejected_up_front(self) -> None:
+        exclusive_opt = self.config("L2")
+        exclusive_opt["levels"][1]["inclusion"] = "exclusive"  # type: ignore[index]
+        with self.assertRaises(ConfigError) as ctx:
+            simulate_with_opt(self.accesses, exclusive_opt)
+        self.assertIn("inclusion 'nine'", str(ctx.exception))
+
+        inclusive_below = self.config("L1")
+        inclusive_below["levels"][1]["inclusion"] = "inclusive"  # type: ignore[index]
+        with self.assertRaises(ConfigError) as ctx:
+            simulate_with_opt(self.accesses, inclusive_below)
+        self.assertIn("inclusive level", str(ctx.exception))
+
+    def test_cli_run_and_compare_accept_an_opt_config(self) -> None:
+        import contextlib
+        import io
+        import json
+        import os
+
+        from cachesim.cli import main
+
+        path = os.path.join(self.dir, "opt.json")
+        with open(path, "w") as f:
+            json.dump(self.config("L2"), f)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["run", "--config", path, self.trace])
+        self.assertEqual(code, 0)
+        self.assertIn("OPT", out.getvalue())
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["compare", self.trace, "--config", "default", "--config", path])
+        self.assertEqual(code, 0)
+        self.assertIn("opt", out.getvalue())
