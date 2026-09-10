@@ -1,218 +1,400 @@
-# Cache & Memory-Hierarchy Simulator
+# cachesim
 
-A trace-driven, configurable simulator for the CPU cache hierarchy, written in
-plain Python. Feed it a stream of memory addresses, describe a hierarchy
-(L1 → L2 → L3 → DRAM), and it reports hits, misses, miss rates, a breakdown of
-*why* each miss happened, and AMAT — the one number that summarizes how fast
-your memory system is.
+`cachesim` is a trace-driven simulator for configurable multi-level set-associative cache
+hierarchies. It replays memory references through an L1/L2/L3 chain backed by a main-memory
+model and reports hits, misses, evictions, traffic and AMAT per level. The model covers ten
+replacement policies plus Belady's OPT as an offline lower bound, modulo and XOR-folded set
+indexing, inclusive / exclusive / NINE inclusion, write-back and write-through with or
+without write-allocate, hardware prefetchers, victim caches, an open-page DRAM row-buffer
+model, and write-back propagation between levels. On top of it come per-reference and
+aggregate (Hill and Smith) three-C miss classification, Mattson stack-distance analysis
+yielding the miss-ratio curve at every capacity from one pass, parameter sweeps and
+configuration comparisons, and a verification suite built on an independent reference model.
 
-No computer-architecture background is assumed; every term is explained below.
+[![CI](https://github.com/saahilshah178/cache-hierarchy-simulator-/actions/workflows/ci.yml/badge.svg)](https://github.com/saahilshah178/cache-hierarchy-simulator-/actions/workflows/ci.yml) [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-## Why caches exist (30 seconds)
+## Features
 
-A CPU can do arithmetic in under a nanosecond, but fetching data from main
-memory (DRAM) takes ~100 nanoseconds. So CPUs keep small, fast stashes of
-recently-used data close to the core — **caches** — arranged in layers:
+Model
 
-| Level | Typical size | Typical latency | Kitchen analogy |
-|-------|--------------|-----------------|-----------------|
-| L1    | ~32 KB       | ~4 cycles       | the counter     |
-| L2    | ~256 KB      | ~12 cycles      | the pantry      |
-| L3    | ~2–32 MB     | ~40 cycles      | the basement    |
-| DRAM  | gigabytes    | ~100+ cycles    | the grocery store |
+- Any number of levels, each with its own `size`, `block_size`, `associativity`, `hit_time`.
+- Replacement (`policy`): `lru`, `fifo`, `random`, `plru` (tree-PLRU), `nru`, `lfu`, `mru`,
+  `srrip`, `brrip`, `drrip`, and the offline `opt` (Belady's MIN).
+- Set indexing (`index`): `modulo` low-order bits, or `xor` XOR-folded hashing.
+- Inclusion per level (`inclusion`): `nine`, `inclusive` with back-invalidation, `exclusive`.
+- Writes per level (`write_policy`, `write_allocate`): write-back or write-through,
+  write-allocate or no-write-allocate.
+- Prefetching (`prefetcher`) and a fully-associative victim buffer (`victim_cache`).
+- Main memory (`memory`): constant latency or open-page row buffer, plus `bus_width` timing.
 
-Every access checks L1 first. Found it? That's a **hit** — fast. Not there?
-A **miss** — go down a level and try again. The entire game of memory-system
-design is maximizing hits, and this simulator lets you watch how the three
-big design knobs change the score.
+Analysis
+
+- `cachesim run` — per-level counters, three-C classification, traffic, and analytic and
+  measured AMAT, as text or JSON.
+- `cachesim sweep` — size, associativity, block size or policy, or a size x associativity
+  grid, over a single level, with CSV and plots.
+- `cachesim policies` — every replacement policy on one trace against the OPT bound.
+- `cachesim mrc` — LRU miss-ratio curve and reuse-distance histogram from one pass.
+- `cachesim compare` — one trace through several configurations, tabulated with deltas.
+- `cachesim sets` — cumulative hot-set histogram and windowed set oversubscription.
+- `cachesim trace-stats` — footprint, distinct blocks and pages, compulsory-miss floor.
+
+Verification
+
+- An independent naive reimplementation (`cachesim.reference`) shares no algorithmic code
+  with the model and is compared against it access by access.
+- `cachesim run --check` evaluates the algebraic identities in `cachesim.invariants`.
+- Property-based tests search for counterexamples to the counter algebra, the three-C
+  decomposition, level chaining and the LRU stack property.
+- Textbook known answers, hand-derived closed forms, and pinned golden results.
+
+## Installation
+
+Python 3.10 or newer. The core is standard library only; `matplotlib` renders the plots.
+
+```bash
+pip install -e .              # simulator and CLI
+pip install -e ".[plots]"     # adds matplotlib for --plot / --plot-dir
+pip install -e ".[dev]"       # adds pytest, hypothesis, ruff, mypy, matplotlib
+```
 
 ## Quick start
 
-Requires Python 3.8+. Only `sweep.py`'s plots need a third-party package
-(`pip install matplotlib`); everything else is stdlib.
+Generate the sample traces (about 20 MB; they are not checked in) and simulate one:
 
 ```bash
-python3 traces/generate_traces.py        # create the sample traces (~17 MB)
-python3 simulator.py traces/sequential.trace   # run one trace, get a report
-python3 sweep.py                         # the two payoff plots -> plots/
-python3 tests.py                         # 22 known-answer tests, all stdlib
+cachesim gen-traces --out-dir traces
+cachesim run traces/matmul_naive.trace
 ```
 
-## The files
+```text
+========================================================================
+CACHE HIERARCHY SIMULATION REPORT  (traces/matmul_naive.trace)
+========================================================================
+Total accesses :      532,480   (reads 528,384 / writes 4,096)
+DRAM reads     :        1,536   (0.29% of all accesses missed every level)
+DRAM writes    :            0   (dirty lines written back from L3)
 
-| File | What it is |
-|------|-----------|
-| `cache.py` | One cache level: size, block size, associativity, and replacement policy are all parameters. Also classifies misses into the "3 Cs". |
-| `hierarchy.py` | Chains levels into L1 → L2 → L3 → DRAM, forwards misses down, and does the timing/AMAT accounting. |
-| `simulator.py` | Reads a trace file and drives it through a hierarchy. `--config file.json` to change the hierarchy (see `example_config.json`). |
-| `report.py` | Formats the statistics into the report you see. |
-| `sweep.py` | Sweeps associativity (1→16-way) and cache size (1→64 KB), prints tables, and plots miss rate against each. |
-| `traces/generate_traces.py` | Regenerates the sample traces (deterministic — same files every time). |
-| `tests.py` | Hand-checkable unit tests: LRU vs FIFO victims, conflict thrash, 3-C classification, AMAT identity, trace parsing. |
-| `example_config.json` | A hierarchy config you can copy and edit. |
+--- L1: 32.0 KB, 64 B blocks, 4-way, LRU, hit time 4 cyc ---
+  accesses    :      532,480
+  hits        :      504,568   (reads 504,568 / writes 0)
+  misses      :       27,912   (reads 23,816 / writes 4,096)
+  local miss rate  :   5.24%   (misses / accesses that reached this level)
+  global miss rate :   5.24%   (misses / all CPU accesses)
+  evictions   :       27,400   (writebacks of dirty blocks: 4,088)
+  traffic     :       1.7 MB in from below / 255.5 KB out below
+  miss classification      per-reference    aggregate
+    compulsory                     1,536        1,536
+    capacity                       4,032       32,256
+    conflict                      22,344       -5,880
+    fully-associative LRU misses: 33,792   hits it would have missed: 28,224
+
+[the L2 and L3 sections are omitted here]
+
+========================================================================
+DRAM traffic            : 96.0 KB read / 0 B written
+AMAT (analytic formula) :    5.033 cycles
+AMAT (measured)         :    5.033 cycles   (2,679,904 cycles / 532,480 accesses)
+  loads                 :    4.948 cycles   (2,614,368 cycles / 528,384 loads)
+  stores                :   16.000 cycles   (65,536 cycles / 4,096 stores)
+========================================================================
+```
+
+`--format json` emits every counter behind that report, versioned by `schema_version`;
+`--check` prints `invariants: 62 checks passed` for this run and exits non-zero on any
+violation; `--warmup N` simulates the first N accesses, resets the statistics, and reports
+only the remainder. The analysis subcommands follow, with `bench` for throughput:
+
+```bash
+cachesim run --format json traces/matmul_naive.trace
+cachesim run --check traces/matmul_naive.trace
+cachesim run --warmup 100000 traces/matmul_naive.trace
+cachesim sweep --param size --assoc 4 traces/matmul_naive.trace
+cachesim sweep --grid traces/matmul_naive.trace
+cachesim policies --size 32768 --assoc 4 traces/matmul_naive.trace
+cachesim mrc traces/matmul_naive.trace
+cachesim compare traces/matmul_naive.trace --config default --config configs/inclusive.json
+cachesim sets traces/matmul_naive.trace --window 512
+cachesim trace-stats traces/matmul_naive.trace
+cachesim bench traces/matmul_naive.trace
+```
+
+Full option reference: [docs/cli.md](docs/cli.md).
+
+## Results
+
+### Loop order
+
+![L1 miss rate against cache size for the naive and blocked matrix multiply](docs/figures/miss_rate_vs_size_matmul.png)
+
+Both traces perform the same 64x64 double-precision matrix multiply and touch the same 1,536
+distinct blocks, so their compulsory floor and DRAM read count are identical. The naive
+i/j/k order walks B by column with a 512-byte stride and loses each column before the next
+reuse; the 16x16 blocked order keeps a 2 KB tile of A, B and C resident. Sweeping a single
+4-way level, blocked falls below 1% at 16 KB while naive stays above 50% until 32 KB.
+
+| Trace (default hierarchy) | Accesses | L1 misses | L1 miss rate | L2 local miss rate | AMAT (cycles) |
+|---------------------------|----------:|----------:|-------------:|-------------------:|--------------:|
+| `matmul_naive.trace`      |   532,480 |    27,912 |        5.24% |              5.50% |         5.033 |
+| `matmul_blocked.trace`    |   557,056 |     3,572 |        0.64% |             43.00% |         4.463 |
+
+```bash
+cachesim run traces/matmul_naive.trace
+cachesim run traces/matmul_blocked.trace
+cachesim sweep --param size --assoc 4 traces/matmul_naive.trace
+cachesim sweep --param size --assoc 4 traces/matmul_blocked.trace
+```
+
+### Replacement policy against the OPT bound
+
+![Misses per replacement policy against the OPT bound on the naive matrix multiply](docs/figures/policies_matmul_naive.png)
+
+At 32 KB, 4-way, LRU sits 2.30x above per-set OPT on this trace, and `random` beats it by a
+quarter. LRU's worst case is cyclic re-reference of a working set slightly larger than the
+capacity, which is what a 512-byte column stride produces; `random` never commits to that
+victim choice, and the RRIP policies avoid it by predicting a distant re-reference for newly
+filled blocks. Per-set OPT is optimal given the set mapping, while the fully-associative
+Belady bound of 2,184 misses (0.41%) shows what the mapping itself costs.
+
+| Policy   |  Misses | Miss rate | x OPT |
+|----------|--------:|----------:|------:|
+| `opt`    |  12,141 |     2.28% |  1.00 |
+| `random` |  19,872 |     3.73% |  1.64 |
+| `srrip`  |  22,432 |     4.21% |  1.85 |
+| `drrip`  |  23,367 |     4.39% |  1.92 |
+| `nru`    |  27,388 |     5.14% |  2.26 |
+| `plru`   |  27,854 |     5.23% |  2.29 |
+| `lru`    |  27,912 |     5.24% |  2.30 |
+| `fifo`   |  28,024 |     5.26% |  2.31 |
+| `brrip`  |  52,149 |     9.79% |  4.30 |
+| `mru`    | 120,217 |    22.58% |  9.90 |
+| `lfu`    | 181,125 |    34.02% | 14.92 |
+
+Changing the set-index function is the more effective response, because the misses come from
+the mapping rather than from the victim choice. Setting `"index": "xor"` on L1 folds the
+high-order block bits into the index, so a power-of-two stride no longer aliases.
+
+| L1 `index` | L1 misses | L1 miss rate | Conflict (per-reference) | AMAT (cycles) |
+|------------|----------:|-------------:|-------------------------:|--------------:|
+| `modulo`   |    27,912 |        5.24% |                   22,344 |         5.033 |
+| `xor`      |     5,470 |        1.03% |                        0 |         4.527 |
+
+```bash
+cachesim policies --size 32768 --assoc 4 traces/matmul_naive.trace
+
+cat > /tmp/xor-l1.json <<'JSON'
+{"memory_access_time": 100,
+ "levels": [
+   {"name": "L1", "size": 32768, "block_size": 64, "associativity": 4,
+    "policy": "lru", "hit_time": 4, "index": "xor"},
+   {"name": "L2", "size": 262144, "block_size": 64, "associativity": 8,
+    "policy": "lru", "hit_time": 12},
+   {"name": "L3", "size": 2097152, "block_size": 64, "associativity": 16,
+    "policy": "lru", "hit_time": 40}]}
+JSON
+cachesim run traces/matmul_naive.trace
+cachesim run --config /tmp/xor-l1.json traces/matmul_naive.trace
+```
+
+### Associativity and the sign of aggregate conflict
+
+![Miss rate against associativity on the conflict trace](docs/figures/miss_rate_vs_associativity_conflict.png)
+
+`conflict.trace` reads four sequential streams in lockstep with their bases 1 MB apart, so
+the corresponding element of all four maps to one set for any geometry with at most 16,384
+sets. At 8 KB a direct-mapped or 2-way cache holds fewer of those blocks than the streams
+need and misses every access; four ways hold all four, and the miss rate drops to the
+compulsory floor of 12.5%, one miss per 64-byte block of eight 8-byte references. Past the
+knee the curve is flat and conflict misses are zero.
+
+| Associativity | Miss rate | AMAT (cycles) | Compulsory | Capacity | Conflict |
+|--------------:|----------:|--------------:|-----------:|---------:|---------:|
+|             1 |   100.00% |        104.00 |      8,192 |        0 |   57,344 |
+|             2 |   100.00% |        104.00 |      8,192 |        0 |   57,344 |
+|             4 |    12.50% |         16.50 |      8,192 |        0 |        0 |
+|             8 |    12.50% |         16.50 |      8,192 |        0 |        0 |
+|            16 |    12.50% |         16.50 |      8,192 |        0 |        0 |
+
+```bash
+cachesim sweep --param associativity --size 8192 traces/conflict.trace
+```
+
+The aggregate conflict count is a subtraction of totals — misses minus the misses of a
+fully-associative LRU cache of the same capacity — so it goes negative whenever the set
+mapping beats fully-associative LRU, which is what the 32 KB L1 of the report above shows:
+27,912 - 33,792 = -5,880. Splitting the column walk across 128 sets shortens the
+re-reference cycle each set sees, so LRU keeps blocks the shadow cache had already evicted;
+those 28,224 anti-conflict hits are exactly the gap between the two taxonomies, since
+per-reference conflict (22,344) minus them gives the aggregate figure.
+
+Block size against AMAT, inclusion policies, prefetching, the DRAM row buffer, victim
+caches, set pressure and miss-ratio curves: [docs/results.md](docs/results.md).
+
+## Configuration
+
+A hierarchy is a JSON object with a memory model and a list of levels, the one nearest the
+core first. This is `configs/default.json`, the built-in hierarchy used without `--config`:
+
+```json
+{
+  "memory_access_time": 100,
+  "levels": [
+    {"name": "L1", "size": 32768, "block_size": 64,
+     "associativity": 4, "policy": "lru", "hit_time": 4},
+    {"name": "L2", "size": 262144, "block_size": 64,
+     "associativity": 8, "policy": "lru", "hit_time": 12},
+    {"name": "L3", "size": 2097152, "block_size": 64,
+     "associativity": 16, "policy": "lru", "hit_time": 40}
+  ]
+}
+```
+
+`name`, `size`, `block_size`, `associativity` and `hit_time` are required per level. Every
+other key is optional and defaults to the behaviour above:
+
+- `policy` — replacement policy name (default `lru`).
+- `index` — `modulo` or `xor` set-index function (default `modulo`).
+- `inclusion` — relation to the level above: `nine` (default), `inclusive`, `exclusive`.
+- `write_policy` — `write-back` or `write-through` (default `write-back`).
+- `write_allocate` — whether a write miss fetches the block here (default `true`).
+- `bus_width` — bytes/cycle of the fill link, adding `ceil(block_size / bus_width)` cycles.
+- `prefetcher` — `none`, `next-line` or `stride` (default `none`).
+- `victim_cache` — `{"entries": N}` for a fully-associative victim buffer (default `null`).
+- `memory` / `memory_access_time` — top level: a constant latency in cycles, or a `memory`
+  object selecting a `constant` or `row-buffer` DRAM model.
+
+`configs/` holds a worked example of each feature. Full key reference, validation rules and
+defaults: [docs/configuration.md](docs/configuration.md).
 
 ## Trace format
 
-One access per line: a hex byte-address, then `R` (read) or `W` (write).
-Blank lines and `#` comments are ignored.
+The native format is one access per line: a hexadecimal byte address, whitespace, then `R`
+for a load or `W` for a store. Blank lines and everything after `#` are ignored.
 
-```
+```text
 0x00400000 R
 0x00400008 R
 0x7fff0010 W
 ```
 
-## Configuration parameters, in plain language
+Dinero IV traces (`.din`) and Valgrind Lackey output (`.lackey`, `.vg`, from
+`--trace-mem=yes`) are read directly, any path ending in `.gz` is decompressed
+transparently, and `--trace-format` overrides the extension. The sample workloads and their
+expected behaviour: [docs/workloads.md](docs/workloads.md).
 
-These appear in `example_config.json` / `simulator.DEFAULT_CONFIG` and as
-`sweep.py` flags.
+## How it works
 
-- **`size`** — total bytes the cache holds (32768 = 32 KB). Bigger caches hit
-  more but are slower and burn more power, which is why L1 stays small even
-  though transistors are cheap.
+| Module | Responsibility |
+|--------|----------------|
+| `cache.py` | One level as sets x ways: `probe`, `allocate`, `invalidate`, dirty bits, victim buffer, three-C classification against a shadow fully-associative LRU cache. |
+| `policies.py` | Replacement policies and the `POLICIES` registry: LRU, FIFO, random, tree-PLRU, NRU, LFU, MRU, SRRIP, BRRIP, DRRIP. |
+| `indexing.py` | Set-index functions built from the set count: low-order `modulo` and XOR-folded `xor`. |
+| `hierarchy.py` | Chains levels over a memory model: miss handling, write-back propagation, inclusion, write policies, prefetch, transfer time, timing and AMAT. |
+| `prefetch.py` | Prefetchers watching demand references at a level: tagged next-line and per-region stride. |
+| `dram.py` | Main memory below the last level: constant latency, or an open-page row buffer with banks. |
+| `config.py` | The JSON schema as typed `HierarchySpec` / `CacheSpec` records, with defaults and errors naming the offending key. |
+| `stats.py` | `HierarchyStats`, the counter snapshot both the text report and the JSON output are rendered from. |
+| `report.py` | Renders a stats snapshot as the human-readable text report. |
+| `trace.py` | Reading and writing traces in the native, Dinero IV and Lackey formats, gzip included. |
+| `workloads.py` | Deterministic synthetic workload generators and the registry behind `gen-traces`. |
+| `opt.py` | Belady's MIN: the fully-associative `opt_misses` bound and the per-set `OPTPolicy`. |
+| `stackdist.py` | Mattson stack-distance profiling: miss counts at every capacity, and every associativity, from one pass. |
+| `sweep.py` | Sweeps one parameter, or a size x associativity grid, over a single level; tables, CSV and plots. |
+| `compare.py` | Replays one parsed trace through several configurations and tabulates the deltas. |
+| `setpressure.py` | Per-set diagnostics: cumulative hot sets and windowed oversubscription of ways. |
+| `invariants.py` | The identities a finished simulation must satisfy; the engine behind `run --check`. |
+| `reference.py` | An independent, deliberately naive reimplementation used only as a test oracle. |
+| `cli.py` | Argument parsing and subcommand dispatch; each subcommand registers itself. |
 
-- **`block_size`** — caches move data in fixed-size chunks called blocks (or
-  "lines"), typically 64 bytes. Miss on one byte and the cache pulls in the
-  whole 64-byte block, betting you'll want the neighbors soon (you usually
-  do — that's *spatial locality*, and it's why scanning an array is cheap:
-  one miss buys the next 7 8-byte elements for free).
+An access is a byte address and a read/write flag. The address is divided by the block size
+to give a block number, which chooses a set through the level's index function. The
+hierarchy probes top-down, charging each level its hit time and passing a miss to the level
+below, so the accesses a level sees equal the miss count of the level above it; if every
+level misses, the memory model supplies the block and charges the memory access time. The
+block is then filled bottom-up into every level that missed, and a fill into a full set
+evicts a victim chosen by that level's replacement policy. A dirty victim is written into
+the level below — marking its copy dirty, or allocating the line dirty when the copy is gone
+— and a dirty line leaving the last level becomes a DRAM write; that propagation is counted
+but charged no cycles, as if absorbed by write buffers. A store dirties the line only in the
+highest level that allocates for it. The full model, inclusion and write-policy variations
+included: [docs/model.md](docs/model.md).
 
-- **`associativity`** — how many places within the cache a given block is
-  *allowed* to live. The cache is organized as `sets × ways`: an address is
-  assigned to exactly one **set** (by simple arithmetic on the address), and
-  may occupy any of the set's `associativity` **ways**.
-  - `1` (**direct-mapped**): one possible spot per address. Fast and cheap to
-    check, but two hot addresses assigned the same spot evict each other
-    forever.
-  - `4`/`8` (**set-associative**): the real-world compromise; a small group
-    of spots per address.
-  - ways = all blocks (**fully associative**): a block can go anywhere. No
-    conflicts, but hardware must compare against every entry at once —
-    too expensive except for tiny structures (e.g. TLBs).
+## Validation
 
-- **`policy`** — when a set is full, who gets evicted?
-  - `lru` — Least Recently Used: evict the block untouched the longest.
-    Usually best; costs bookkeeping.
-  - `fifo` — evict whatever was *loaded* longest ago, even if it's hot.
-  - `random` — evict a random way. Nearly free in hardware, and surprisingly
-    decent — on our naive-matmul trace it actually *beats* LRU (3.7% vs 5.2%
-    miss rate), because LRU's worst case is exactly the cyclic re-scan
-    pattern that strided loops produce, while random never commits to a
-    pathological choice. Adding your own policy is a ~10-line subclass in
-    `cache.py` (see `POLICIES`).
+627 tests (`pytest --co -q -o addopts=""`) establish correctness from six directions.
 
-- **`hit_time`** — cycles charged to probe that level (whether it hits or
-  misses; a miss pays the probe *and then* the levels below).
+- **Differential testing.** `cachesim.reference` is a second implementation written from the
+  documented semantics, sharing no algorithmic code with the model. Both are driven with the
+  same seeded streams and compared per access — the cycle count and the cumulative per-level
+  miss vector after every reference — so a divergence is reported where it first appears.
+- **Property-based testing.** The hypothesis library searches for counterexamples to laws
+  that hold for any geometry and any stream: counter algebra, the three-C decomposition and
+  its two taxonomies, compulsory misses equalling distinct blocks at every level, level
+  chaining, the LRU stack property, and determinism.
+- **Algebraic invariants.** `cachesim.invariants` checks counter algebra, traffic flow,
+  write-back conservation, the timing identity `analytic AMAT == measured AMAT`, and
+  structural consistency, each stepping aside with a reason when a feature makes it
+  inapplicable. It is reachable from the CLI as `run --check`.
+- **Textbook known answers.** Published reference strings with published fault counts,
+  Belady's anomaly under FIFO, and the LRU stack property.
+- **Closed forms.** Whole-trace results derived by hand from the geometry and the access
+  pattern before being asserted, so a changed number has to be argued with.
+- **Golden regressions and a stack-distance cross-check.** The six sample workloads are
+  pinned end to end from generator to report, and the Mattson profiler's miss curve must
+  equal simulation exactly at every capacity and associativity.
 
-- **`memory_access_time`** — cycles for DRAM once everything has missed.
+What each identity assumes: [docs/validation.md](docs/validation.md).
 
-## Output metrics, in plain language
+## Development
 
-- **hits / misses** — per level. A miss at L1 becomes an access at L2, so
-  L2's numbers only count traffic L1 couldn't serve.
-
-- **local miss rate** — misses ÷ accesses *that reached this level*. L2's
-  local miss rate often looks terrible (50%+) because L1 already filtered
-  out all the easy hits — that's normal, not a bug.
-
-- **global miss rate** — misses ÷ *all* CPU accesses. This is the fraction
-  of your program's memory traffic that got past this level.
-
-- **evictions / writebacks** — how many blocks were kicked out, and how many
-  of those had been written to ("dirty") and had to be saved downward. The
-  simulator uses write-back, write-allocate: writes are cached like reads and
-  modified data is only pushed down on eviction.
-
-- **the 3 Cs** — every miss is classified by *what would have prevented it*:
-  - **compulsory** — the first-ever touch of that block. No cache of any
-    size or shape could have hit. Only bigger blocks (prefetching) help.
-  - **capacity** — a *fully-associative* cache of the same total size would
-    also have missed: your working set is simply bigger than the cache.
-    Only a bigger cache (or better locality in your code) helps.
-  - **conflict** — the fully-associative twin *would have hit*, so the miss
-    is purely from too many blocks fighting over one set. More ways help.
-
-  The classification works by running a shadow fully-associative LRU cache
-  of identical capacity next to each level and comparing outcomes.
-
-- **AMAT (Average Memory Access Time)** — the headline number:
-
-  ```
-  AMAT = hit_time + miss_rate × miss_penalty
-  ```
-
-  where the miss penalty of each level is the AMAT of everything below it,
-  so the formula nests: `L1_hit + m1 × (L2_hit + m2 × (L3_hit + m3 × DRAM))`.
-  The report prints both this formula and the measured average
-  (total simulated cycles ÷ accesses); they agree, which is a good self-check.
-  Note the nesting is why an L1 miss-rate improvement is worth so much more
-  than the same improvement at L3: L1's miss rate multiplies *everything*.
-
-## The sample traces
-
-| Trace | Pattern | What it teaches |
-|-------|---------|-----------------|
-| `sequential.trace` | linear scan of 256 KB, twice | The friendliest case: one miss per 64 B block, then 7 free hits. Pass 2 hits in L2 (256 KB) but not L1 (32 KB) — you can see the hierarchy working level by level. |
-| `random.trace` | uniform random over 16 MB | The cruelest case: ~91% of accesses fall all the way to DRAM, AMAT ≈ 147 cycles vs ~14 for sequential. Same machine, 10× slower — *this* is why cache-friendly code matters. |
-| `matmul_naive.trace` | C = A×B, 64×64 doubles, i-j-k order | Walks B by column: 512-byte stride, terrible locality. L1 miss rate ≈ 5.2%. |
-| `matmul_blocked.trace` | the *same* multiplication in 16×16 tiles | Identical math, different order: L1 miss rate ≈ 0.6% — **8× fewer misses just from loop order**. The classic interview demo. |
-| `conflict.trace` | 4 streams whose addresses alias to the same sets | Pure conflict misses: ~100% miss below 4-way, 12.5% at 4-way and beyond. The cleanest associativity knee. |
-| `pointer_chase.trace` | a shuffled linked list in 1 MB, ~4 laps | Unpredictable jumps: L1/L2 miss ~100%, but L3 (2 MB) holds the whole list and serves ~73% of accesses. Reuse only pays if some level can hold the working set. |
-
-## The two payoff plots (`python3 sweep.py`)
-
-Both sweeps use a single cache level backed by DRAM so the knob you're
-turning isn't blurred by other levels.
-
-**Miss rate vs associativity** (on `conflict.trace`, size fixed at 8 KB):
-100% at 1-way and 2-way, then a cliff to 12.5% at 4-way, then dead flat.
-The flattening is a real engineering decision — past the knee, extra ways
-cost power and latency and buy *nothing*. Check the 3-C columns in the
-table: the conflict misses go to exactly zero at the knee, and the
-compulsory misses that remain are untouchable by definition.
-
-**Miss rate vs cache size** (on `matmul_naive.trace`, 4-way fixed):
-flat ~51% from 1 KB to 16 KB, then a cliff to 5% at 32 KB and 0.3% at 64 KB.
-Caches don't help gradually — they help *when the working set fits*. The
-cliff sits exactly where one 32 KB matrix starts fitting.
-
-**A worthwhile detour:** run `python3 sweep.py traces/matmul_naive.trace`
-and watch associativity *fail* to help (and at 32 KB, actively hurt —
-try `--size 32768`). The 64×64 matrix rows are 512 bytes — a power of two —
-so B's column accesses keep landing on the same few sets no matter how the
-cache is shaped: at fixed size, doubling the ways halves the sets, and the
-aliasing follows you. This is a famous real-world trap (it's why HPC
-programmers pad arrays to avoid power-of-two leading dimensions) and a good
-reminder that the clean textbook curve assumes conflicts among a *few* hot
-blocks, not a systematic stride.
-
-## Extending the replacement policy
-
-Everything is registered by name in `cache.POLICIES`:
-
-```python
-class MyPolicy(ReplacementPolicy):
-    def on_hit(self, set_idx, way): ...  # an access hit this way
-    def on_fill(self, set_idx, way): ...  # a new block landed in this way
-    def victim(self, set_idx): ...  # set is full: pick a way to evict
-
-
-POLICIES["mine"] = MyPolicy
+```bash
+make install     # pip install -e ".[dev]"
+make test        # pytest
+make lint        # ruff check . && ruff format --check .
+make typecheck   # mypy (strict)
+make check       # lint + typecheck + test
+make traces      # cachesim gen-traces --out-dir traces
 ```
 
-`victim()` is only called when the set is completely full — empty ways are
-always filled first, so policies never see invalid lines. A natural next
-step is SRRIP/BRRIP from the RRIP family (Jaleel, Theobald, Steely &
-Emer, ISCA 2010 — the line of work Moinuddin Qureshi's group builds on):
-keep a 2-bit "re-reference prediction" counter per line instead of full
-LRU order. It's ~20 lines here and it is *actual* modern-cache research.
+CI runs the test suite on CPython 3.10, 3.11, 3.12, 3.13 and 3.14, then smoke-tests every
+subcommand and the invariant checker on freshly generated traces. A separate job runs
+`ruff check`, `ruff format --check` and `mypy` under `strict = true` with
+`warn_unreachable`, over both `cachesim` and `tests`.
 
-## What "cycle-accurate" means here
+## References
 
-Hit/miss/eviction behavior and access-time accounting are exact for the
-model described: probe levels in order, charge each level's hit time,
-allocate on miss at every level, write-back + write-allocate for stores.
-Deliberately not modeled: pipelining/overlap of misses (MSHRs), DRAM row
-buffers and banks, prefetchers, cache inclusion policies, coherence, and
-write-buffer timing (writebacks are counted but not charged cycles). Each
-of those is a fine extension project.
+- Belady, L. A., "A study of replacement algorithms for a virtual-storage computer", IBM
+  Systems Journal 5(2), 1966.
+- Mattson, R. L., Gecsei, J., Slutz, D. R., Traiger, I. L., "Evaluation techniques for
+  storage hierarchies", IBM Systems Journal 9(2), 1970.
+- Smith, A. J., "Cache Memories", ACM Computing Surveys 14(3), 1982.
+- Baer, J.-L., Wang, W.-H., "On the Inclusion Properties for Multi-Level Cache
+  Hierarchies", ISCA, 1988.
+- Hill, M. D., Smith, A. J., "Evaluating Associativity in CPU Caches", IEEE Transactions on
+  Computers 38(12), 1989.
+- Jouppi, N. P., "Improving Direct-Mapped Cache Performance by the Addition of a Small
+  Fully-Associative Cache and Prefetch Buffers", ISCA, 1990.
+- Chen, T.-F., Baer, J.-L., "Effective Hardware-Based Data Prefetching for High-Performance
+  Processors", IEEE Transactions on Computers 44(5), 1995.
+- Gonzalez, A., Valero, M., Topham, N., Parcerisa, J. M., "Eliminating cache conflict
+  misses through XOR-based placement functions", ICS, 1997.
+- McKeeman, W. M., "Differential Testing for Software", Digital Technical Journal 10(1),
+  1998.
+- Edler, J., Hill, M. D., "Dinero IV: Trace-Driven Uniprocessor Cache Simulator",
+  University of Wisconsin-Madison, 1998.
+- Rixner, S., Dally, W. J., Kapasi, U. J., Mattson, P., Owens, J. D., "Memory Access
+  Scheduling", ISCA, 2000.
+- Nethercote, N., Seward, J., "Valgrind: A Framework for Heavyweight Dynamic Binary
+  Instrumentation", PLDI, 2007.
+- Qureshi, M. K., Jaleel, A., Patt, Y. N., Steely, S. C., Emer, J., "Adaptive Insertion
+  Policies for High Performance Caching", ISCA, 2007.
+- Jaleel, A., Theobald, K. B., Steely, S. C., Emer, J., "High Performance Cache Replacement
+  Using Re-Reference Interval Prediction (RRIP)", ISCA, 2010.
+- Hennessy, J. L., Patterson, D. A., "Computer Architecture: A Quantitative Approach", 6th
+  ed., Morgan Kaufmann, 2017.
+- Silberschatz, A., Galvin, P. B., Gagne, G., "Operating System Concepts", 10th ed., Wiley,
+  2018.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
