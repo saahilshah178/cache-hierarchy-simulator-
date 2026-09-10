@@ -211,9 +211,9 @@ class TestExclusive(unittest.TestCase):
         written: list[int] = []
 
         class Recording(Hierarchy):
-            def _write_to_memory(self, block: int) -> None:
-                super()._write_to_memory(block)
+            def _write_to_memory(self, block: int, charged: bool = False) -> int:
                 written.append(block)
+                return super()._write_to_memory(block, charged)
 
         rng = random.Random(17)
         h = Recording(

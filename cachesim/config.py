@@ -44,6 +44,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
 from typing import Any
 
+from cachesim.dram import ConstantMemory, MemoryModel, RowBufferMemory
 from cachesim.indexing import DEFAULT_INDEX, INDEX_FUNCTIONS
 from cachesim.policies import POLICIES
 from cachesim.prefetch import PREFETCHER_NAMES
@@ -122,16 +123,61 @@ class CacheSpec:
 
 
 @dataclass(frozen=True)
+class ConstantMemorySpec:
+    """Main memory that answers every access in ``latency`` cycles."""
+
+    latency: int
+
+    def build(self) -> MemoryModel:
+        return ConstantMemory(self.latency)
+
+    def to_config(self) -> dict[str, Any]:
+        """Written back as the ``memory_access_time`` shorthand."""
+        return {"memory_access_time": self.latency}
+
+
+@dataclass(frozen=True)
+class RowBufferMemorySpec:
+    """Main memory with one open row per bank; see ``cachesim.dram``."""
+
+    row_size: int = 8192
+    banks: int = 8
+    row_hit: int = 40
+    row_miss: int = 100
+
+    def build(self) -> MemoryModel:
+        return RowBufferMemory(
+            row_size=self.row_size,
+            banks=self.banks,
+            row_hit=self.row_hit,
+            row_miss=self.row_miss,
+        )
+
+    def to_config(self) -> dict[str, Any]:
+        return {"memory": {"type": "row-buffer", **asdict(self)}}
+
+
+#: Either form of the ``memory`` configuration.
+MemorySpec = ConstantMemorySpec | RowBufferMemorySpec
+
+
+@dataclass(frozen=True)
 class HierarchySpec:
     """Parameters of a whole hierarchy: its levels, L1 first, and DRAM."""
 
     levels: tuple[CacheSpec, ...]
-    memory_access_time: int
+    memory: MemorySpec
+
+    @property
+    def memory_access_time(self) -> int | None:
+        """The fixed DRAM latency, or None if the memory model is not a
+        constant one."""
+        return self.memory.latency if isinstance(self.memory, ConstantMemorySpec) else None
 
     def to_dict(self) -> dict[str, Any]:
         """The JSON-compatible dict form accepted by ``parse_config``."""
         return {
-            "memory_access_time": self.memory_access_time,
+            **self.memory.to_config(),
             "levels": [asdict(level) for level in self.levels],
         }
 
@@ -187,7 +233,7 @@ def load_config(path: str) -> dict[str, Any]:
 
 _LEVEL_REQUIRED = ("name", "size", "block_size", "associativity", "hit_time")
 _LEVEL_KEYS = frozenset(f.name for f in fields(CacheSpec))
-_TOP_KEYS = frozenset({"levels", "memory_access_time"})
+_TOP_KEYS = frozenset({"levels", "memory_access_time", "memory"})
 
 
 def _is_int(value: Any) -> bool:
@@ -293,6 +339,68 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
     )
 
 
+_MEMORY_TYPES = ("constant", "row-buffer")
+_ROW_BUFFER_KEYS = frozenset({"type", *(f.name for f in fields(RowBufferMemorySpec))})
+
+
+def _parse_memory(config: Mapping[str, Any]) -> MemorySpec:
+    """Read the main-memory model from the top level of a configuration.
+
+    ``memory_access_time: N`` and ``memory: N`` both mean a constant
+    N-cycle memory and are interchangeable; ``memory`` may instead be an
+    object naming a richer model. The two keys are mutually exclusive so a
+    configuration can never state two different memory latencies.
+    """
+    if "memory" in config and "memory_access_time" in config:
+        raise ConfigError(
+            "top level: give either 'memory_access_time' or 'memory', not both; "
+            "'memory_access_time': N is shorthand for 'memory': N"
+        )
+    if "memory" not in config:
+        return ConstantMemorySpec(
+            _require_int("top level", "memory_access_time", config["memory_access_time"], 0)
+        )
+    memory = config["memory"]
+    if _is_int(memory):
+        return ConstantMemorySpec(_require_int("top level", "memory", memory, 0))
+    if not isinstance(memory, Mapping):
+        raise ConfigError(
+            f"'memory' must be an integer latency or an object, got {type(memory).__name__}"
+        )
+    kind = memory.get("type", "constant")
+    if not isinstance(kind, str):
+        raise ConfigError(f"memory: 'type' must be a string, got {kind!r}")
+    kind = kind.lower()
+    if kind == "constant":
+        unknown = sorted(set(memory) - {"type", "latency"})
+        if unknown:
+            raise ConfigError(f"memory (constant): unknown key(s) {', '.join(map(repr, unknown))}")
+        if "latency" not in memory:
+            raise ConfigError("memory (constant): missing required key 'latency'")
+        return ConstantMemorySpec(
+            _require_int("memory (constant)", "latency", memory["latency"], 0)
+        )
+    if kind != "row-buffer":
+        raise ConfigError(f"memory: unknown type {kind!r}; choose from {', '.join(_MEMORY_TYPES)}")
+    unknown = sorted(set(memory) - _ROW_BUFFER_KEYS)
+    if unknown:
+        raise ConfigError(f"memory (row-buffer): unknown key(s) {', '.join(map(repr, unknown))}")
+    where = "memory (row-buffer)"
+    defaults = RowBufferMemorySpec()
+    spec = RowBufferMemorySpec(
+        row_size=_require_int(where, "row_size", memory.get("row_size", defaults.row_size), 1),
+        banks=_require_int(where, "banks", memory.get("banks", defaults.banks), 1),
+        row_hit=_require_int(where, "row_hit", memory.get("row_hit", defaults.row_hit), 0),
+        row_miss=_require_int(where, "row_miss", memory.get("row_miss", defaults.row_miss), 0),
+    )
+    if spec.row_miss < spec.row_hit:
+        raise ConfigError(
+            f"{where}: 'row_miss' ({spec.row_miss}) must be at least "
+            f"'row_hit' ({spec.row_hit}); an open row is never the slower case"
+        )
+    return spec
+
+
 def parse_config(config: Mapping[str, Any]) -> HierarchySpec:
     """Validate a configuration dict and return the typed ``HierarchySpec``.
 
@@ -306,12 +414,15 @@ def parse_config(config: Mapping[str, Any]) -> HierarchySpec:
     unknown = sorted(set(config) - _TOP_KEYS)
     if unknown:
         raise ConfigError(f"unknown top-level key(s) {', '.join(map(repr, unknown))}")
-    missing = [k for k in ("levels", "memory_access_time") if k not in config]
+    missing = ["levels"] if "levels" not in config else []
+    if "memory" not in config and "memory_access_time" not in config:
+        missing.append("memory_access_time")
     if missing:
-        raise ConfigError(f"missing required top-level key(s) {', '.join(map(repr, missing))}")
-    memory_access_time = _require_int(
-        "top level", "memory_access_time", config["memory_access_time"], 0
-    )
+        detail = " (or 'memory')" if "memory_access_time" in missing else ""
+        raise ConfigError(
+            f"missing required top-level key(s) {', '.join(map(repr, missing))}{detail}"
+        )
+    memory = _parse_memory(config)
     raw_levels = config["levels"]
     if not isinstance(raw_levels, list) or not raw_levels:
         raise ConfigError("'levels' must be a non-empty list of cache levels")
@@ -340,4 +451,4 @@ def parse_config(config: Mapping[str, Any]) -> HierarchySpec:
             "all levels must share one block_size (multi-line fills are not modelled), "
             f"got {[level.block_size for level in levels]}"
         )
-    return HierarchySpec(levels=levels, memory_access_time=memory_access_time)
+    return HierarchySpec(levels=levels, memory=memory)

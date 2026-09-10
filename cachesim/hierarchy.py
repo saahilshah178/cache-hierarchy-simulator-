@@ -141,6 +141,20 @@ rate stays a statement about demand references and the AMAT identity
 stays exact. Prefetch lookups also leave the replacement state of the
 levels below untouched.
 
+Main memory
+-----------
+
+Below the last level sits a ``cachesim.dram.MemoryModel``. The default is
+a constant latency -- ``memory_access_time`` -- which is what the model
+has always assumed. The alternative is an open-page DRAM with one
+activated row per bank, under which the *order* of the misses matters as
+much as their number: a sequential miss stream walks a row at a time and
+almost always finds it open, while a random one activates a new row
+nearly every access.
+
+Write-backs and prefetches occupy a bank and shift its open row, so they
+interfere with demand traffic even though they are charged no cycles.
+
 AMAT (average memory access time) is the headline metric:
 
     AMAT = L1_hit_time + L1_miss_rate * L1_miss_penalty
@@ -161,6 +175,7 @@ from typing import Any
 
 from cachesim.cache import Cache, Evicted
 from cachesim.config import ConfigError, HierarchySpec, parse_config
+from cachesim.dram import ConstantMemory, MemoryModel
 from cachesim.prefetch import make_prefetcher
 from cachesim.stats import HierarchyStats, collect
 
@@ -299,10 +314,19 @@ class Hierarchy:
     Parameters
     ----------
     levels             : list of Level, fastest/smallest (L1) first.
-    memory_access_time : cycles to fetch from DRAM after the last level misses.
+    memory_access_time : cycles to fetch from DRAM after the last level
+                         misses. Shorthand for ``memory=ConstantMemory(n)``.
+    memory             : a ``cachesim.dram.MemoryModel`` instead, for a
+                         latency that depends on the address stream.
+                         Exactly one of the two must be given.
     """
 
-    def __init__(self, levels: list[Level], memory_access_time: int) -> None:
+    def __init__(
+        self,
+        levels: list[Level],
+        memory_access_time: int | None = None,
+        memory: MemoryModel | None = None,
+    ) -> None:
         if not levels:
             raise ValueError("a hierarchy needs at least one cache level")
         block_sizes = {level.cache.block_size for level in levels}
@@ -313,9 +337,21 @@ class Hierarchy:
                 f"{levels[0].cache.name}: the first level has no level above it, so its "
                 f"inclusion policy must be 'nine', got {levels[0].inclusion!r}"
             )
+        if memory is None:
+            if memory_access_time is None:
+                raise ValueError("a hierarchy needs a memory_access_time or a memory model")
+            memory = ConstantMemory(memory_access_time)
+        elif memory_access_time is not None:
+            raise ValueError("give either memory_access_time or memory, not both")
         self.levels = levels
         self.block_size = levels[0].cache.block_size
-        self.memory_access_time = memory_access_time
+        self.memory = memory
+        #: The fixed DRAM latency, or None if it depends on the address.
+        self.memory_access_time = memory.constant_latency
+        # When memory answers in a fixed number of cycles there is nothing
+        # for it to remember, so the access path adds the latency directly
+        # rather than calling into the model on every miss.
+        self._constant_latency = memory.constant_latency
         # Precomputed so the access path can skip work no level asks for.
         self._has_exclusive = any(level.exclusive for level in levels)
         self._has_inclusive = any(level.inclusive for level in levels)
@@ -367,7 +403,7 @@ class Hierarchy:
                     prefetcher=level.prefetcher,
                 )
             )
-        return cls(levels, spec.memory_access_time)
+        return cls(levels, memory=spec.memory.build())
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> Hierarchy:
@@ -435,17 +471,22 @@ class Hierarchy:
                 if level.write_through:
                     forward_from = i + 1
         else:
-            time += self.memory_access_time
+            latency = self._constant_latency
             if write:
                 # No level allocates on a write miss: the store goes to DRAM
                 # without ever fetching the block, so nothing is filled.
                 self.dram_demand_writes += 1
-                self._write_to_memory(block)
+                served = self._write_to_memory(block, charged=True)
+                if latency is None:
+                    latency = served
                 fill_from = nlevels
             else:
                 # Missed every level: fetch from DRAM.
                 self.dram_reads += 1
                 self.dram_bytes_read += block_size
+                if latency is None:
+                    latency = self.memory.read(block * block_size)
+            time += latency
 
         dirty = taken >= 0 and not levels[taken].write_through
         if exclusive_anywhere and fill_from < hit_level < nlevels:
@@ -544,6 +585,9 @@ class Hierarchy:
         if source == nlevels:
             self.dram_prefetch_reads += 1
             self.dram_bytes_read += block_size
+            if self._constant_latency is None:
+                # Untimed, but it still occupies a bank and moves an open row.
+                self.memory.read(block * block_size, charged=False)
         elif levels[source].exclusive:
             # As on the demand path, an exclusive level hands the block up.
             removed = levels[source].cache.invalidate(block, count_writeback=False)
@@ -677,10 +721,20 @@ class Hierarchy:
             return
         self._write_to_memory(block)
 
-    def _write_to_memory(self, block: int) -> None:
-        """A block of modified data leaves the last level: one DRAM write."""
+    def _write_to_memory(self, block: int, charged: bool = False) -> int:
+        """A block of modified data leaves the last level: one DRAM write.
+
+        Returns the cycles main memory took. ``charged`` says whether the
+        access is on the critical path -- true only for a store that no
+        cache level allocated for, false for write-backs, which the model
+        assumes a write buffer drains. Either way the write occupies a
+        bank, so it can shift the open rows under the demand stream.
+        """
         self.dram_writes += 1
         self.dram_bytes_written += self.block_size
+        if self._constant_latency is None:
+            return self.memory.write(block * self.block_size, charged=charged)
+        return self._constant_latency
 
     def flush(self) -> int:
         """Write every dirty line back to DRAM and clean it, top-down.
@@ -742,6 +796,8 @@ class Hierarchy:
         self.dram_prefetch_reads = 0
         self.dram_bytes_read = self.dram_bytes_written = 0
         self.read_cycles = self.write_cycles = 0
+        # Memory keeps its open rows, as the caches keep their contents.
+        self.memory.reset_stats()
         for level in self.levels:
             level.reset_stats()
 
@@ -791,8 +847,15 @@ class Hierarchy:
         level above instead, and no-write-allocate levels, which decline
         write misses -- still match on the hit-time and memory terms but
         make the transfer term an upper bound.
+
+        Under a memory model whose latency depends on the address stream,
+        the DRAM term is the *measured* average latency of the accesses
+        that were charged, since no single number describes it in advance.
+        The identity therefore still holds, but the analytic figure is then
+        analytic only in the miss rates; the measured AMAT is the ground
+        truth in both cases.
         """
-        penalty: float = self.memory_access_time
+        penalty: float = self.memory.average_latency()
         for level in reversed(self.levels):
             penalty = level.hit_time + level.cache.miss_rate * (level.transfer_cycles + penalty)
         return penalty

@@ -177,9 +177,9 @@ class RecordingHierarchy(Hierarchy):
         super().__init__(levels, memory_access_time)
         self.written: list[int] = []
 
-    def _write_to_memory(self, block: int) -> None:
-        super()._write_to_memory(block)
+    def _write_to_memory(self, block: int, charged: bool = False) -> int:
         self.written.append(block)
+        return super()._write_to_memory(block, charged)
 
 
 class TestAllFourCombinations(unittest.TestCase):

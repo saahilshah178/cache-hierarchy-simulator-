@@ -151,6 +151,18 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
         f"DRAM traffic            : {_size_str(s.dram_bytes_read)} read"
         f" / {_size_str(s.dram_bytes_written)} written"
     )
+    m = s.memory
+    if m.type != "constant":
+        params = ", ".join(f"{k} {v}" for k, v in m.parameters.items())
+        lines.append(f"DRAM model              : {m.type} ({params})")
+        lines.append(
+            f"  row buffer            : {100 * m.row_buffer_hit_rate:6.2f}% hits"
+            f"   ({m.row_hits:,} hits / {m.row_misses:,} misses)"
+        )
+        lines.append(
+            f"  average latency       : {m.average_latency:8.3f} cycles"
+            "   (measured; the analytic AMAT below uses it)"
+        )
     lines.append(f"AMAT (analytic formula) : {s.amat:8.3f} cycles")
     lines.append(
         f"AMAT (measured)         : {s.measured_amat:8.3f} cycles"

@@ -164,9 +164,9 @@ class TestWritebackPropagation(unittest.TestCase):
         written_to_dram: list[int] = []
 
         class Recording(Hierarchy):
-            def _write_to_memory(self, block: int) -> None:
-                super()._write_to_memory(block)
+            def _write_to_memory(self, block: int, charged: bool = False) -> int:
                 written_to_dram.append(block)
+                return super()._write_to_memory(block, charged)
 
         rng = random.Random(3)
         l1 = Cache("L1", 512, 64, 2)

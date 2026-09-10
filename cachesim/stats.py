@@ -82,6 +82,24 @@ class LevelStats:
 
 
 @dataclass(frozen=True)
+class MemoryStats:
+    """The main-memory model and what it saw; see ``cachesim.dram``.
+
+    ``average_latency`` is the mean over the accesses the hierarchy
+    charged for -- demand fetches and stores no level allocated for -- and
+    is the DRAM term the analytic AMAT uses. The row-buffer figures are
+    zero for a constant-latency memory, which has no rows.
+    """
+
+    type: str
+    parameters: dict[str, int]
+    average_latency: float
+    row_hits: int
+    row_misses: int
+    row_buffer_hit_rate: float
+
+
+@dataclass(frozen=True)
 class HierarchyStats:
     """Counters and derived metrics for a whole hierarchy."""
 
@@ -94,7 +112,8 @@ class HierarchyStats:
     dram_prefetch_reads: int
     dram_bytes_read: int
     dram_bytes_written: int
-    memory_access_time: int
+    memory_access_time: int | None
+    memory: MemoryStats
     total_cycles: int
     read_cycles: int
     write_cycles: int
@@ -182,6 +201,14 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
         dram_bytes_read=h.dram_bytes_read,
         dram_bytes_written=h.dram_bytes_written,
         memory_access_time=h.memory_access_time,
+        memory=MemoryStats(
+            type=h.memory.name,
+            parameters=h.memory.parameters,
+            average_latency=h.memory.average_latency(),
+            row_hits=h.memory.row_hits,
+            row_misses=h.memory.row_misses,
+            row_buffer_hit_rate=h.memory.row_buffer_hit_rate,
+        ),
         total_cycles=h.total_time,
         read_cycles=h.read_cycles,
         write_cycles=h.write_cycles,
