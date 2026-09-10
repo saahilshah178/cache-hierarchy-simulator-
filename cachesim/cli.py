@@ -15,6 +15,7 @@ from typing import TypeAlias
 
 from cachesim import __version__, run_trace
 from cachesim.config import DEFAULT_CONFIG, ConfigError, load_config
+from cachesim.invariants import check_hierarchy
 from cachesim.report import print_report
 from cachesim.workloads import SAMPLE_TRACES, write_sample_traces
 
@@ -41,6 +42,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(json.dumps(hierarchy.stats().to_dict(), indent=2))
     else:
         print_report(hierarchy, trace_name=args.trace)
+    if args.check:
+        # Diagnostics go to stderr so that --format json stays parseable.
+        report = check_hierarchy(hierarchy)
+        for skipped in report.skipped:
+            print(f"invariants: skipped {skipped}", file=sys.stderr)
+        if report.violations:
+            for violation in report.violations:
+                print(f"error: invariant violated: {violation}", file=sys.stderr)
+            return 1
+        print(f"invariants: {report.checked} checks passed", file=sys.stderr)
     return 0
 
 
@@ -65,6 +76,12 @@ def register_run(subparsers: Subparsers) -> None:
         choices=("text", "json"),
         default="text",
         help="report format: human-readable text (default) or JSON",
+    )
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="after the run, verify the simulator's internal invariants "
+        "(see cachesim.invariants) and exit non-zero listing any violation",
     )
     p.set_defaults(func=_cmd_run)
 

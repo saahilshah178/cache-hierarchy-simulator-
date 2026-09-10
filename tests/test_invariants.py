@@ -1,4 +1,4 @@
-"""Tests for the invariant checker.
+"""Tests for the invariant checker and for ``cachesim run --check``.
 
 Two things have to be true of a checker: it stays quiet on a correct run,
 and it speaks up when something is wrong. The first is covered by running
@@ -10,15 +10,22 @@ broke.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import os
 import random
+import tempfile
 import unittest
 from collections.abc import Callable, Iterator
+from typing import Any
 
+from cachesim import run_trace
 from cachesim.cache import EMPTY, Cache
+from cachesim.cli import main
 from cachesim.config import DEFAULT_CONFIG, CacheSpec, HierarchySpec
 from cachesim.hierarchy import Hierarchy, Level
 from cachesim.invariants import check_hierarchy, check_invariants
-from cachesim.workloads import Access, conflict_streams, matmul, sequential
+from cachesim.workloads import Access, conflict_streams, matmul, sequential, write_trace
 
 SMALL = HierarchySpec(
     levels=(
@@ -261,6 +268,62 @@ class TestOptionalFeatureGuards(unittest.TestCase):
         report = check_hierarchy(Hierarchy.from_spec(SMALL))
         self.assertTrue(report.ok)
         self.assertEqual(report.skipped, ("timing identities (no accesses were simulated)",))
+
+
+class TestRunCheckFlag(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.trace = os.path.join(self._tmp.name, "seq.trace")
+        write_trace(self.trace, sequential(buffer_bytes=8 * 1024, passes=2))
+
+    def run_main(self, argv: list[str]) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = main(argv)
+            except SystemExit as exc:
+                code = exc.code if isinstance(exc.code, int) else 1
+        return code, out.getvalue(), err.getvalue()
+
+    def test_check_passes_on_a_normal_run(self) -> None:
+        code, out, err = self.run_main(["run", "--check", self.trace])
+        self.assertEqual(code, 0)
+        self.assertIn("CACHE HIERARCHY SIMULATION REPORT", out)
+        self.assertRegex(err, r"invariants: \d+ checks passed")
+
+    def test_check_keeps_json_output_parseable(self) -> None:
+        import json
+
+        code, out, err = self.run_main(["run", "--check", "--format", "json", self.trace])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["accesses"], 2048)
+        self.assertIn("checks passed", err)  # diagnostics went to stderr
+
+    def test_without_the_flag_nothing_is_checked(self) -> None:
+        code, _, err = self.run_main(["run", self.trace])
+        self.assertEqual(code, 0)
+        self.assertNotIn("invariants", err)
+
+    def test_a_violation_exits_non_zero_and_lists_it(self) -> None:
+        """The CLI path is exercised by corrupting the hierarchy that
+        run_trace hands back."""
+        from unittest import mock
+
+        import cachesim.cli as cli_module
+
+        def corrupting(*args: Any, **kwargs: Any) -> Hierarchy:
+            hierarchy = run_trace(*args, **kwargs)
+            hierarchy.total_time += 13
+            hierarchy.levels[0].cache.hits += 1
+            return hierarchy
+
+        with mock.patch.object(cli_module, "run_trace", corrupting):
+            code, _, err = self.run_main(["run", "--check", self.trace])
+        self.assertEqual(code, 1)
+        self.assertIn("error: invariant violated:", err)
+        self.assertIn("read_hits + write_hits != hits", err)
+        self.assertIn("total_cycles !=", err)
 
 
 if __name__ == "__main__":
