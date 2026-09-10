@@ -1,14 +1,3 @@
-# Canonical author name, so that `git log`, `git shortlog -sne` and
-# `git blame` agree with the byline in LICENSE and pyproject.toml.
-#
-# Every commit was made from one account whose git user.name was the
-# GitHub handle rather than the name the project is published under.
-# This maps the handle to that name on the same address; it changes what
-# git displays, and rewrites nothing.
-#
-# Note that GitHub's web commit list does not read .mailmap -- it shows
-# the account. Setting `git config user.name "Saahil Shah"` fixes future
-# commits at the source; rewriting the existing history would fix the
-# past, and is worth deciding before the repository is published, since
-# rewriting after publication breaks every clone and fork.
+# Canonical author name for git log, shortlog and blame, matching the byline
+# in LICENSE and pyproject.toml. Changes what git displays; rewrites nothing.
 Saahil Shah <saahilshah178@gmail.com> sanjaypshah210 <saahilshah178@gmail.com>
