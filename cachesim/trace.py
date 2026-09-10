@@ -60,9 +60,12 @@ lackey (``.lackey``, ``.vg``)
     A corrupt reference line is skipped for the same reason; use the native
     format when strict validation matters.
 
-Any path ending in ``.gz`` is decompressed transparently; the extension
-that selects the format is the one before ``.gz`` (``sequential.din.gz``
-is a Dinero trace).
+Any path ending in ``.gz`` is compressed and decompressed transparently,
+on both read and write; the extension that selects the format is the one
+before ``.gz`` (``sequential.din.gz`` is a Dinero trace).
+
+``write_trace`` emits any of the three formats, so a trace can be
+converted by reading it in one and writing it in another.
 """
 
 from __future__ import annotations
@@ -70,7 +73,7 @@ from __future__ import annotations
 import gzip
 import os
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import TextIO
 
 #: Trace formats, in addition to ``"auto"`` (choose by file extension).
@@ -208,3 +211,79 @@ def load_trace(path: str, fmt: str = "auto") -> list[tuple[int, bool]]:
     sweep`` does, and re-parsing would dominate the run.
     """
     return list(open_trace(path, fmt))
+
+
+# -- writing ------------------------------------------------------------------
+
+#: Bytes reported in the size field of the formats that have one. The
+#: simulator ignores access size on input, so it is a constant on output.
+WRITE_SIZE = 8
+
+
+def _is_write(op: str | bool) -> bool:
+    """Normalise an access's operation field to a bool.
+
+    Accepts both shapes in circulation: the ``"R"``/``"W"`` strings the
+    workload generators emit and the ``is_write`` bools the readers yield.
+    """
+    if isinstance(op, bool):
+        return op
+    upper = op.upper()
+    if upper not in ("R", "W"):
+        raise ValueError(f"op must be 'R', 'W', or a bool, got {op!r}")
+    return upper == "W"
+
+
+def _format_native(addr: int, is_write: bool) -> str:
+    return f"0x{addr:08x} {'W' if is_write else 'R'}\n"
+
+
+def _format_dinero(addr: int, is_write: bool) -> str:
+    return f"{1 if is_write else 0} {addr:08x}\n"
+
+
+def _format_lackey(addr: int, is_write: bool) -> str:
+    return f" {'S' if is_write else 'L'} {addr:08x},{WRITE_SIZE}\n"
+
+
+_WRITERS: dict[str, Callable[[int, bool], str]] = {
+    "native": _format_native,
+    "dinero": _format_dinero,
+    "lackey": _format_lackey,
+}
+
+
+def write_trace(path: str, accesses: Iterable[tuple[int, str | bool]], fmt: str = "native") -> int:
+    """Write ``accesses`` to ``path`` in ``fmt``; returns the number written.
+
+    Each access is ``(address, op)``, where ``op`` is ``"R"``/``"W"`` (what
+    the workload generators emit) or an ``is_write`` bool (what the readers
+    yield). ``path`` ending in ``.gz`` is compressed.
+
+    Only the read/write distinction survives a round trip: the writers emit
+    Dinero label 0/1 and Lackey ``L``/``S`` records, never an instruction
+    fetch or a modify, and the size field is the constant ``WRITE_SIZE``.
+    Reading any written file back therefore reproduces the same
+    ``(address, is_write)`` sequence in every format.
+    """
+    encode = _WRITERS.get(fmt)
+    if encode is None:
+        raise ValueError(f"unknown trace format {fmt!r}; choose from {', '.join(FORMATS)}")
+    if path.lower().endswith(".gz"):
+        with gzip.open(path, "wt") as gz:
+            return _emit(gz, accesses, encode)
+    with open(path, "w") as f:
+        return _emit(f, accesses, encode)
+
+
+def _emit(
+    f: TextIO,
+    accesses: Iterable[tuple[int, str | bool]],
+    encode: Callable[[int, bool], str],
+) -> int:
+    """Write every access through ``encode``; returns the number written."""
+    count = 0
+    for addr, op in accesses:
+        f.write(encode(addr, _is_write(op)))
+        count += 1
+    return count

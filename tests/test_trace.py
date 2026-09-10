@@ -6,8 +6,10 @@ import gzip
 import os
 import tempfile
 import unittest
+from typing import ClassVar
 
-from cachesim.trace import detect_format, load_trace, open_trace, parse_trace
+from cachesim.trace import detect_format, load_trace, open_trace, parse_trace, write_trace
+from cachesim.workloads import sequential
 
 
 class TraceFileCase(unittest.TestCase):
@@ -186,6 +188,76 @@ class TestFormatSelection(TraceFileCase):
     def test_load_trace_returns_a_list(self) -> None:
         got = load_trace(self.write("t.trace", "0x10 R\n0x20 W\n"))
         self.assertEqual(got, [(0x10, False), (0x20, True)])
+
+
+class TestTraceWriting(TraceFileCase):
+    #: A reference stream with both operations and a wide address range.
+    ACCESSES: ClassVar[list[tuple[int, bool]]] = [
+        (0x0, False),
+        (0x400000, True),
+        (0xDEADBEEF, False),
+        (0x7FFFFFFFFFFF, True),
+    ]
+
+    def test_native_output_is_byte_for_byte_stable(self) -> None:
+        # The golden trace digests depend on this exact rendering.
+        path = self.path("t.trace")
+        self.assertEqual(write_trace(path, [(0x10, "R"), (0x20, "W")]), 2)
+        with open(path) as f:
+            self.assertEqual(f.read(), "0x00000010 R\n0x00000020 W\n")
+
+    def test_dinero_output(self) -> None:
+        path = self.path("t.din")
+        write_trace(path, [(0x10, "R"), (0x20, "W")], fmt="dinero")
+        with open(path) as f:
+            self.assertEqual(f.read(), "0 00000010\n1 00000020\n")
+
+    def test_lackey_output(self) -> None:
+        path = self.path("t.lackey")
+        write_trace(path, [(0x10, "R"), (0x20, "W")], fmt="lackey")
+        with open(path) as f:
+            self.assertEqual(f.read(), " L 00000010,8\n S 00000020,8\n")
+
+    def test_bool_and_string_operations_are_both_accepted(self) -> None:
+        strings = self.path("s.trace")
+        bools = self.path("b.trace")
+        write_trace(strings, [(0x10, "r"), (0x20, "W")])
+        write_trace(bools, [(0x10, False), (0x20, True)])
+        with open(strings) as a, open(bools) as b:
+            self.assertEqual(a.read(), b.read())
+
+    def test_bad_operation_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            write_trace(self.path("t.trace"), [(0x10, "X")])
+
+    def test_unknown_format_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            write_trace(self.path("t.trace"), [(0x10, "R")], fmt="pin")
+
+    def test_round_trip_through_every_format(self) -> None:
+        # native -> dinero -> lackey -> native must preserve the stream.
+        stream = list(self.ACCESSES)
+        for name, fmt in (
+            ("a.trace", "native"),
+            ("b.din", "dinero"),
+            ("c.lackey", "lackey"),
+            ("d.trace", "native"),
+        ):
+            path = self.path(name)
+            self.assertEqual(write_trace(path, stream, fmt=fmt), len(self.ACCESSES))
+            stream = load_trace(path)  # format detected from the extension
+            self.assertEqual(stream, self.ACCESSES, f"lost by {fmt}")
+
+    def test_round_trip_through_gzip(self) -> None:
+        path = self.path("t.din.gz")
+        write_trace(path, self.ACCESSES, fmt="dinero")
+        self.assertEqual(load_trace(path), self.ACCESSES)
+
+    def test_written_workload_matches_the_generator(self) -> None:
+        path = self.path("seq.trace")
+        write_trace(path, sequential(buffer_bytes=1024, passes=2))
+        expected = [(addr, op == "W") for addr, op in sequential(buffer_bytes=1024, passes=2)]
+        self.assertEqual(load_trace(path), expected)
 
 
 if __name__ == "__main__":

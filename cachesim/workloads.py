@@ -33,6 +33,10 @@ import os
 import random
 from collections.abc import Callable, Iterable, Iterator
 
+# Re-exported (the `as` form marks it deliberate for mypy): a generator and
+# the writer that serialises it are usually wanted together.
+from cachesim.trace import write_trace as write_trace
+
 WORD = 8  # 8-byte (double / pointer) accesses
 BLOCK = 64  # cache-block size the patterns are designed around
 
@@ -148,19 +152,6 @@ SAMPLE_TRACES: dict[str, Callable[[], Iterator[Access]]] = {
     "conflict": conflict_streams,
     "pointer_chase": pointer_chase,
 }
-
-
-def write_trace(path: str, accesses: Iterable[Access]) -> int:
-    """Write an iterable of (addr, op) to ``path`` in the native format.
-
-    Returns the number of accesses written.
-    """
-    count = 0
-    with open(path, "w") as f:
-        for addr, op in accesses:
-            f.write(f"0x{addr:08x} {op}\n")
-            count += 1
-    return count
 
 
 def write_sample_traces(
