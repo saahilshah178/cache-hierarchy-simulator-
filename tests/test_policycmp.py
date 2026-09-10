@@ -131,8 +131,10 @@ class TestPolicyCompareCLI(unittest.TestCase):
 
     def test_bad_flags_fail_with_a_message(self) -> None:
         for argv, fragment in [
-            ([self.trace, "--size", "0"], "positive integer"),
+            ([self.trace, "--size", "0"], "size must be positive"),
+            ([self.trace, "--size", "junk"], "not a size"),
             ([self.trace, "--assoc", "0"], "positive integer"),
+            ([self.trace, "--block-size", "0"], "size must be positive"),
             ([self.trace, "--hit-time", "-1"], "non-negative"),
             ([self.trace, "--size", "3000"], "not a multiple"),
         ]:

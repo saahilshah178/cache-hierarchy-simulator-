@@ -30,10 +30,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from cachesim.cache import Cache
-from cachesim.cliargs import write_or_error
+from cachesim.cliargs import (
+    load_trace_or_error,
+    non_negative_int,
+    parse_size,
+    positive_int,
+    write_or_error,
+)
 from cachesim.opt import OPT, opt_misses, run_opt
+from cachesim.plot import format_bytes
 from cachesim.policies import POLICIES
-from cachesim.trace import parse_trace
 
 
 @dataclass(frozen=True)
@@ -156,38 +162,24 @@ def write_csv(path: str, results: Sequence[PolicyResult]) -> None:
 # -- command-line plumbing ------------------------------------------------------
 
 
-def _positive_int(text: str) -> int:
-    value = int(text)
-    if value <= 0:
-        raise argparse.ArgumentTypeError(f"must be a positive integer, got {text}")
-    return value
-
-
-def _non_negative_int(text: str) -> int:
-    value = int(text)
-    if value < 0:
-        raise argparse.ArgumentTypeError(f"must be a non-negative integer, got {text}")
-    return value
-
-
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Add the policy-comparison options to ``parser``."""
     parser.add_argument("trace", help="trace file (one 'ADDR R|W' per line)")
     parser.add_argument(
-        "--size", type=_positive_int, default=32 * 1024, help="cache size in bytes (default 32768)"
+        "--size", type=parse_size, default=32 * 1024, help="cache size in bytes (default 32768)"
     )
     parser.add_argument(
-        "--assoc", type=_positive_int, default=4, help="associativity in ways (default 4)"
+        "--assoc", type=positive_int, default=4, help="associativity in ways (default 4)"
     )
     parser.add_argument(
-        "--block-size", type=_positive_int, default=64, help="block size in bytes (default 64)"
+        "--block-size", type=parse_size, default=64, help="block size in bytes (default 64)"
     )
     parser.add_argument(
-        "--hit-time", type=_non_negative_int, default=4, help="cache hit time in cycles (default 4)"
+        "--hit-time", type=non_negative_int, default=4, help="cache hit time in cycles (default 4)"
     )
     parser.add_argument(
         "--mem-time",
-        type=_non_negative_int,
+        type=non_negative_int,
         default=100,
         help="memory access time in cycles (default 100)",
     )
@@ -201,20 +193,10 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             f"--size {args.size} is not a multiple of --block-size * --assoc "
             f"({args.block_size} * {args.assoc})"
         )
-    try:
-        accesses = list(parse_trace(args.trace))
-    except FileNotFoundError:
-        parser.error(
-            f"trace not found: {args.trace} (run `cachesim gen-traces` to create the samples)"
-        )
-    except (OSError, ValueError) as exc:
-        parser.error(str(exc))
-    if not accesses:
-        parser.error(f"no accesses in {args.trace}")
-
+    accesses = load_trace_or_error(parser, args.trace)
     print(
         f"{args.trace}: {len(accesses):,} accesses through one level of "
-        f"{args.size // 1024} KB, {args.assoc}-way, {args.block_size} B blocks "
+        f"{format_bytes(args.size)}, {args.assoc}-way, {args.block_size} B blocks "
         f"({args.size // (args.block_size * args.assoc)} sets)"
     )
     results = compare_policies(

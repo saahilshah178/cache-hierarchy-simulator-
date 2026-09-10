@@ -135,9 +135,13 @@ class TestBenchCLI(unittest.TestCase):
         self.assertIn("no accesses", err)
 
     def test_bad_repeat(self) -> None:
-        code, _, err = self.run_main(["bench", "--repeat", "0", self.trace])
-        self.assertEqual(code, 1)
-        self.assertIn("--repeat", err)
+        """A bad count is a usage error and exit 2, as everywhere else in the CLI."""
+        for value in ("0", "-1"):
+            with self.subTest(repeat=value):
+                code, _, err = self.run_main(["bench", "--repeat", value, self.trace])
+                self.assertEqual(code, 2)
+                self.assertIn("--repeat", err)
+                self.assertIn("positive integer", err)
 
     def test_an_offline_policy_config_is_declined_not_crashed(self) -> None:
         """`run` simulates this config; bench must say why it will not."""

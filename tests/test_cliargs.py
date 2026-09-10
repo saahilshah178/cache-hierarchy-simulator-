@@ -3,7 +3,7 @@
 These helpers used to be copied into each analysis module, so the same
 input could be accepted by one command and rejected by another. The tests
 here pin the grammar and the error paths once, and the last class asserts
-that all four commands really do reach this module rather than keeping a
+that every command really does reach this module rather than keeping a
 private copy of it.
 """
 
@@ -16,7 +16,17 @@ import os
 import tempfile
 import unittest
 
-from cachesim import cliargs, compare, setpressure, stackdist, sweep
+from cachesim import (
+    benchcmd,
+    cli,
+    cliargs,
+    compare,
+    policycmp,
+    setpressure,
+    stackdist,
+    sweep,
+    tracecmd,
+)
 from cachesim.cliargs import (
     load_trace_or_error,
     non_negative_int,
@@ -155,7 +165,7 @@ class TestWriteOrError(unittest.TestCase):
 class TestCommandsShareTheHelpers(unittest.TestCase):
     """No command may keep a private copy that can drift from this one.
 
-    Four modules parsing "4k" four different ways is exactly how one
+    Five modules parsing "4k" five different ways is exactly how one
     command ends up accepting a capacity another rejects. Identity, not
     equality: these must be the same function objects.
     """
@@ -163,19 +173,40 @@ class TestCommandsShareTheHelpers(unittest.TestCase):
     def test_every_module_imports_rather_than_redefines(self) -> None:
         for module, names in (
             (sweep, ("positive_int", "non_negative_int", "parse_size", "load_trace_or_error")),
-            (stackdist, ("positive_int", "read_trace")),
+            (stackdist, ("positive_int", "parse_size", "read_trace")),
             (compare, ("non_negative_int", "load_trace_or_error")),
             (
                 setpressure,
                 ("positive_int", "non_negative_int", "parse_size", "load_trace_or_error"),
             ),
+            (
+                policycmp,
+                ("positive_int", "non_negative_int", "parse_size", "load_trace_or_error"),
+            ),
+            (cli, ("non_negative_int",)),
+            (benchcmd, ("positive_int",)),
+            (tracecmd, ("parse_size",)),
         ):
             for name in names:
                 with self.subTest(module=module.__name__, name=name):
                     self.assertIs(getattr(module, name), getattr(cliargs, name))
 
+    def test_every_block_size_flag_speaks_the_same_grammar(self) -> None:
+        """`--block-size 1k` must mean 1024 on every command that has the flag."""
+        for build, argv in (
+            (sweep.add_arguments, ["--block-size", "1k"]),
+            (stackdist.add_arguments, ["t", "--block-size", "1k"]),
+            (setpressure.add_arguments, ["t", "--block-size", "1k"]),
+            (policycmp.add_arguments, ["t", "--block-size", "1k"]),
+            (tracecmd.add_arguments, ["t", "--block-size", "1k"]),
+        ):
+            parser = argparse.ArgumentParser(prog="cachesim test")
+            build(parser)
+            with self.subTest(command=build.__module__):
+                self.assertEqual(parser.parse_args(argv).block_size, 1024)
+
     def test_no_module_defines_a_private_lookalike(self) -> None:
-        for module in (sweep, stackdist, compare, setpressure):
+        for module in (sweep, stackdist, compare, setpressure, policycmp):
             for name in ("_positive_int", "_non_negative_int", "_parse_size", "_load_trace"):
                 with self.subTest(module=module.__name__, name=name):
                     self.assertFalse(hasattr(module, name))

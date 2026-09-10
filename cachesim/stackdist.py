@@ -65,7 +65,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from cachesim.cliargs import positive_int, read_trace, write_or_error
+from cachesim.cliargs import parse_size, positive_int, read_trace, write_or_error
 from cachesim.plot import MatplotlibUnavailable, format_bytes, plot_mrc
 
 #: Stack distance reported for the first reference to a block. Real
@@ -587,7 +587,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Add the ``mrc`` options to ``parser``."""
     parser.add_argument("trace", help="trace file (one 'ADDR R|W' per line)")
     parser.add_argument(
-        "--block-size", type=positive_int, default=64, help="block size in bytes (default 64)"
+        "--block-size", type=parse_size, default=64, help="block size in bytes (default 64)"
     )
     parser.add_argument(
         "--sets",

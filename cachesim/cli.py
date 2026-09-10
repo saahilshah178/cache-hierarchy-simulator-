@@ -16,6 +16,7 @@ from typing import TypeAlias
 
 from cachesim import __version__, run_trace
 from cachesim.benchcmd import register as register_bench
+from cachesim.cliargs import non_negative_int
 from cachesim.config import DEFAULT_CONFIG, ConfigError, load_config
 from cachesim.invariants import check_hierarchy
 from cachesim.report import print_report
@@ -77,7 +78,7 @@ def register_run(subparsers: Subparsers) -> None:
     )
     p.add_argument(
         "--warmup",
-        type=int,
+        type=non_negative_int,
         default=0,
         metavar="N",
         help="simulate the first N accesses, then reset all statistics before "

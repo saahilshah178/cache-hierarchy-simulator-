@@ -427,7 +427,8 @@ class TestMrcCli(unittest.TestCase):
 
     def test_bad_flags_fail_with_a_message(self) -> None:
         for argv, fragment in [
-            ([self.trace, "--block-size", "0"], "positive integer"),
+            ([self.trace, "--block-size", "0"], "size must be positive"),
+            ([self.trace, "--block-size", "junk"], "not a size"),
             ([self.trace, "--sets", "0"], "positive integer"),
             ([self.trace, "--max-capacity", "-1"], "positive integer"),
         ]:

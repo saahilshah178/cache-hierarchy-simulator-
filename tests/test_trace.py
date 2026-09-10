@@ -586,6 +586,26 @@ class TestTraceStats(TraceFileCase):
         self.assertEqual(data["distinct_blocks"], 1024)
         self.assertEqual(data["distinct_pages"], 2)
 
+    def test_cli_block_size_takes_a_suffix_like_the_other_commands(self) -> None:
+        path = self.path("t.trace")
+        write_trace(path, sequential(buffer_bytes=8 * 1024, passes=2))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["trace-stats", "--block-size", "1k", "--format", "json", path])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["block_size"], 1024)
+
+    def test_cli_rejects_a_non_positive_block_size_as_a_usage_error(self) -> None:
+        """It used to reach analyse_trace and blame `page_size`, which is not a flag."""
+        path = self.path("t.trace")
+        write_trace(path, sequential(buffer_bytes=8 * 1024, passes=2))
+        for value in ("0", "-8"):
+            with self.subTest(block_size=value), self.assertRaises(SystemExit) as ctx:
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    main(["trace-stats", "--block-size", value, path])
+            self.assertEqual(ctx.exception.code, 2)
+
     def test_cli_reads_foreign_formats(self) -> None:
         path = self.path("t.din")
         write_trace(path, sequential(buffer_bytes=8 * 1024, passes=2), fmt="dinero")

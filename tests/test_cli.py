@@ -93,6 +93,13 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("no accesses", err)
 
+    def test_a_negative_warmup_is_a_usage_error(self) -> None:
+        """It used to parse, be silently ignored, and report the whole trace."""
+        code, _, err = self.run_main(["run", self.trace, "--warmup", "-5"])
+        self.assertEqual(code, 2)
+        self.assertIn("--warmup", err)
+        self.assertIn("non-negative", err)
+
     def test_gen_traces_writes_selected_files(self) -> None:
         out_dir = os.path.join(self._tmp.name, "gen")
         code, out, _ = self.run_main(["gen-traces", "--out-dir", out_dir, "conflict"])

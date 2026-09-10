@@ -1,12 +1,15 @@
 """Argument types and trace loading shared by the analysis subcommands.
 
-``sweep``, ``mrc``, ``compare`` and ``sets`` all take the same kinds of
-argument -- a count that must be positive, a capacity written as ``4k``, a
-trace file that may not exist -- and each had grown its own copy of the
-same four helpers. Copies drift: one accepts ``4KB`` and another does not,
-one says "trace not found" and another lets a FileNotFoundError escape as a
-traceback. Defining them once makes the four commands agree by
-construction.
+``sweep``, ``policies``, ``mrc``, ``compare`` and ``sets`` all take the
+same kinds of argument -- a count that must be positive, a capacity
+written as ``4k``, a trace file that may not exist -- and each had grown
+its own copy of the same few helpers. Copies drift: one accepts ``4KB``
+and another does not, one says "trace not found" and another lets a
+FileNotFoundError escape as a traceback, and argparse prints whichever
+private name the copy happened to carry. Defining them once makes the
+commands agree by construction, and ``run``, ``trace-stats`` and ``bench``
+take their numeric types from here too, so a flag spelled the same way on
+two commands means the same thing on both.
 
 The functions here belong to the command line, not to the simulator. They
 raise ``argparse.ArgumentTypeError`` (which argparse turns into a usage

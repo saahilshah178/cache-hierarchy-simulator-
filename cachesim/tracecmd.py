@@ -27,6 +27,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from cachesim.cliargs import parse_size
 from cachesim.trace import FORMATS, open_trace
 
 #: The page size the page count is reported at: 4 KB, the size on x86-64 and
@@ -157,10 +158,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("trace", help="trace file to summarise")
     parser.add_argument(
         "--block-size",
-        type=int,
+        type=parse_size,
         default=64,
         metavar="B",
-        help="block size the footprint and first-touch counts assume (default 64)",
+        help="block size the footprint and first-touch counts assume "
+        "(default 64; accepts a k/M suffix, e.g. 1k)",
     )
     parser.add_argument(
         "--trace-format",

@@ -37,6 +37,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from cachesim.cliargs import positive_int
 from cachesim.config import DEFAULT_CONFIG, ConfigError, load_config, parse_config
 from cachesim.hierarchy import Hierarchy
 from cachesim.opt import uses_opt
@@ -123,7 +124,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--repeat",
-        type=int,
+        type=positive_int,
         default=DEFAULT_REPEAT,
         metavar="N",
         help=f"simulation passes to time, each through a fresh hierarchy "
@@ -145,8 +146,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace) -> int:
     """Execute ``bench``; exits with a message on a bad trace or config."""
-    if args.repeat < 1:
-        sys.exit(f"error: --repeat must be at least 1, got {args.repeat}")
     config = DEFAULT_CONFIG
     if args.config:
         try:
