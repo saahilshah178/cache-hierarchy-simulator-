@@ -67,6 +67,8 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
             extra += f", {lv.bus_width} B/cyc bus ({lv.transfer_cycles} cyc/block)"
         if lv.prefetcher != "none":
             extra += f", {lv.prefetcher} prefetch"
+        if lv.victim_cache_entries:
+            extra += f", {lv.victim_cache_entries}-entry victim cache"
         lines.append(
             f"--- {lv.name}: {_size_str(lv.size)}, {lv.block_size} B blocks, "
             f"{lv.associativity}-way, {lv.policy.upper()}, hit time {lv.hit_time} cyc"
@@ -124,6 +126,11 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
                 f"    accuracy  : {100 * lv.prefetch_accuracy:6.2f}%   (useful / issued)"
                 f"    coverage : {100 * lv.prefetch_coverage:6.2f}%"
                 "   (useful / (useful + demand misses))"
+            )
+        if lv.victim_cache_entries:
+            lines.append(
+                f"  victim cache hits   : {lv.victim_hits:>6,}"
+                "   (array misses the victim buffer served)"
             )
         if lv.prefetch_probes:
             lines.append(

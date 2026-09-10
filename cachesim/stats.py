@@ -51,6 +51,7 @@ class LevelStats:
     bus_width: int | None
     transfer_cycles: int
     prefetcher: str
+    victim_cache_entries: int | None
     accesses: int
     hits: int
     misses: int
@@ -78,6 +79,7 @@ class LevelStats:
     prefetch_probe_hits: int
     prefetch_accuracy: float
     prefetch_coverage: float
+    victim_hits: int
     three_c: ThreeCStats | None
 
 
@@ -160,6 +162,7 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
                 bus_width=level.bus_width,
                 transfer_cycles=level.transfer_cycles,
                 prefetcher=level.prefetcher_name,
+                victim_cache_entries=c.victim.entries if c.victim is not None else None,
                 accesses=c.accesses,
                 hits=c.hits,
                 misses=c.misses,
@@ -187,6 +190,7 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
                 prefetch_probe_hits=level.prefetch_probe_hits,
                 prefetch_accuracy=level.prefetch_accuracy,
                 prefetch_coverage=level.prefetch_coverage,
+                victim_hits=c.victim_hits,
                 three_c=three_c,
             )
         )

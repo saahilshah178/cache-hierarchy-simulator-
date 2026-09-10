@@ -33,6 +33,7 @@ key                     default        effect
 ``write_allocate``      ``true``       whether a write miss allocates here
 ``bus_width``           ``null``       bytes/cycle of the link from below
 ``prefetcher``          ``"none"``     hardware prefetcher at this level
+``victim_cache``        ``null``       entries in a victim buffer here
 ======================  =============  ==================================
 """
 
@@ -103,7 +104,9 @@ class CacheSpec:
     of the link that carries blocks from the level below INTO this level;
     ``None`` models an infinitely wide link, adding no transfer term.
     ``prefetcher`` names the hardware prefetcher watching this level (see
-    ``cachesim.prefetch``).
+    ``cachesim.prefetch``), and ``victim_cache`` the number of entries in a
+    fully-associative victim buffer beside its array (see
+    ``cachesim.cache.VictimBuffer``); ``None`` for neither.
     """
 
     name: str
@@ -120,6 +123,7 @@ class CacheSpec:
     write_allocate: bool = True
     bus_width: int | None = None
     prefetcher: str = "none"
+    victim_cache: int | None = None
 
 
 @dataclass(frozen=True)
@@ -316,6 +320,19 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
         raise ConfigError(
             f"{where}: unknown prefetcher {prefetcher!r}; choose from {', '.join(PREFETCHER_NAMES)}"
         )
+    raw_victim = spec.get("victim_cache")
+    if isinstance(raw_victim, Mapping):
+        unknown_victim = sorted(set(raw_victim) - {"entries"})
+        if unknown_victim:
+            raise ConfigError(
+                f"{where}: 'victim_cache' has unknown key(s) {', '.join(map(repr, unknown_victim))}"
+            )
+        if "entries" not in raw_victim:
+            raise ConfigError(f"{where}: 'victim_cache' is missing required key 'entries'")
+        raw_victim = raw_victim["entries"]
+    victim_cache = (
+        None if raw_victim is None else _require_int(where, "victim_cache", raw_victim, 1)
+    )
     raw_bus_width = spec.get("bus_width")
     bus_width = (
         None if raw_bus_width is None else _require_int(where, "bus_width", raw_bus_width, 1)
@@ -336,6 +353,7 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
         write_allocate=write_allocate,
         bus_width=bus_width,
         prefetcher=prefetcher,
+        victim_cache=victim_cache,
     )
 
 

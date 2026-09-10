@@ -86,6 +86,67 @@ class Evicted(NamedTuple):
     prefetched: bool = False
 
 
+class VictimBuffer:
+    """A small fully-associative LRU buffer beside a cache's tag array.
+
+    Every line the array replaces is pushed in here instead of leaving the
+    level, and a reference that misses the array but finds its block here
+    takes it back. A handful of entries is enough to hold the blocks that a
+    direct-mapped or low-associativity cache keeps throwing at each other,
+    so the buffer removes conflict misses without the cost of widening
+    every set.
+
+    Jouppi, "Improving Direct-Mapped Cache Performance by the Addition of a
+    Small Fully-Associative Cache and Prefetch Buffers", ISCA 1990, which
+    reports that four entries remove a large fraction of the conflict
+    misses of a direct-mapped cache.
+    """
+
+    def __init__(self, entries: int) -> None:
+        if isinstance(entries, bool) or not isinstance(entries, int):
+            raise ValueError(f"victim buffer entries must be an integer, got {entries!r}")
+        if entries < 1:
+            raise ValueError(f"victim buffer needs at least one entry, got {entries}")
+        self.entries = entries
+        # Block number -> line, least recently used first.
+        self._lines: OrderedDict[int, Evicted] = OrderedDict()
+
+    def __contains__(self, block: int) -> bool:
+        return block in self._lines
+
+    def peek(self, block: int) -> Evicted | None:
+        """The buffered line, without disturbing the LRU order."""
+        return self._lines.get(block)
+
+    def take(self, block: int) -> Evicted | None:
+        """Remove and return the buffered line, or None if it is absent."""
+        return self._lines.pop(block, None)
+
+    def push(self, line: Evicted) -> Evicted | None:
+        """Insert ``line`` as most recently used.
+
+        Returns the line pushed out of the buffer, which is the one that
+        actually leaves the cache level, or None if there was room.
+        """
+        self._lines[line.block] = line
+        self._lines.move_to_end(line.block)
+        if len(self._lines) > self.entries:
+            _, overflow = self._lines.popitem(last=False)
+            return overflow
+        return None
+
+    def replace(self, line: Evicted) -> bool:
+        """Update a buffered line in place; returns False if it is absent."""
+        if line.block not in self._lines:
+            return False
+        self._lines[line.block] = line
+        return True
+
+    def lines(self) -> Iterator[Evicted]:
+        """Every buffered line, least recently used first."""
+        return iter(list(self._lines.values()))
+
+
 def _validate_geometry(name: str, size: int, block_size: int, associativity: int) -> None:
     """Reject geometries that cannot be simulated.
 
@@ -127,6 +188,8 @@ class Cache:
     rng_seed      : seed for the random policy.
     index         : set-index function name (see ``indexing.INDEX_FUNCTIONS``);
                     "modulo" is the plain low-order-bits mapping.
+    victim_entries: size of a fully-associative victim buffer beside the
+                    array (see ``VictimBuffer``); None or 0 for none.
     """
 
     def __init__(
@@ -139,6 +202,7 @@ class Cache:
         track_3c: bool = True,
         rng_seed: int = 0,
         index: str = DEFAULT_INDEX,
+        victim_entries: int | None = None,
     ) -> None:
         _validate_geometry(name, size, block_size, associativity)
 
@@ -194,6 +258,13 @@ class Cache:
         self._dirty = [[False] * associativity for _ in range(self.num_sets)]
         self._prefetched = [[False] * associativity for _ in range(self.num_sets)]
 
+        #: Optional fully-associative buffer of lines the array has replaced.
+        self.victim = VictimBuffer(victim_entries) if victim_entries else None
+        #: Set by ``probe`` when a victim-buffer hit pushed a line out of the
+        #: level; a hierarchy drains it with ``take_pending_eviction``.
+        self.pending_eviction: Evicted | None = None
+        self.victim_hits = 0  # hits the array missed and the buffer served
+
         # --- statistics -----------------------------------------------------
         self.hits = 0
         self.misses = 0
@@ -248,6 +319,11 @@ class Cache:
         Updates hit/miss statistics, replacement state, the dirty bit on a
         write hit, and the 3-C classification on a miss. Does not fill: on a
         miss the caller decides whether and how to ``allocate``.
+
+        A victim buffer is part of the level, and probed with the array: a
+        block found there counts as a hit (and as a ``victim_hits``), and is
+        swapped back into the array immediately, which may push a line out
+        of the level into ``pending_eviction``.
         """
         index = self._index_fn
         set_idx = block % self.num_sets if index is None else index(block)
@@ -266,6 +342,24 @@ class Cache:
                 else:
                     self.read_hits += 1
                 self.policy.on_hit(set_idx, way, block)
+                if self.track_3c and not self._update_shadow(block):
+                    self.anti_conflict_hits += 1
+                return True
+
+        if self.victim is not None:
+            line = self.victim.take(block)
+            if line is not None:
+                self.hits += 1
+                self.victim_hits += 1
+                if is_write:
+                    self.write_hits += 1
+                else:
+                    self.read_hits += 1
+                # Swap: the block goes back into the array and the line it
+                # displaces takes its place in the buffer.
+                self.pending_eviction = self.allocate(
+                    block, dirty=line.dirty or is_write, prefetched=line.prefetched
+                )
                 if self.track_3c and not self._update_shadow(block):
                     self.anti_conflict_hits += 1
                 return True
@@ -290,6 +384,10 @@ class Cache:
         ``prefetched`` marks the line as speculatively fetched; the flag is
         cleared by ``clear_prefetched`` on the first demand hit, and travels
         with the line into the ``Evicted`` record if it leaves unused.
+
+        With a victim buffer the line the array replaces does not leave the
+        level: it is pushed into the buffer, and what this returns is the
+        line the buffer pushed out, if any.
         """
         index = self._index_fn
         set_idx = block % self.num_sets if index is None else index(block)
@@ -311,7 +409,9 @@ class Cache:
             way = self.policy.victim(set_idx)
             self.evictions += 1
             evicted = Evicted(blocks[way], dirty_bits[way], prefetched_bits[way])
-            if evicted.dirty:
+            if self.victim is not None:
+                evicted = self.victim.push(evicted)
+            if evicted is not None and evicted.dirty:
                 self.writebacks += 1
 
         blocks[way] = block
@@ -345,11 +445,36 @@ class Cache:
                     self.writebacks += 1
                 self.policy.on_invalidate(set_idx, way)
                 return removed
+        if self.victim is not None:
+            buffered = self.victim.take(block)
+            if buffered is not None:
+                self.invalidations += 1
+                if buffered.dirty and count_writeback:
+                    self.writebacks += 1
+                return buffered
         return None
 
+    def take_pending_eviction(self) -> Evicted | None:
+        """Return and clear the line a victim-buffer swap pushed out.
+
+        ``probe`` sets it when a hit in the victim buffer put a block back
+        into the array and the line it displaced did not fit in the buffer.
+        A hierarchy drains it after every probe so the line can be written
+        back or handed to the level below.
+        """
+        pending = self.pending_eviction
+        self.pending_eviction = None
+        return pending
+
     def contains(self, block: int) -> bool:
-        """True if ``block`` is currently resident (no statistics updated)."""
-        return block in self._blocks[self.set_of(block)]
+        """True if ``block`` is currently resident (no statistics updated).
+
+        A block sitting in the victim buffer is resident: it is still in
+        this level and a reference to it will hit.
+        """
+        if block in self._blocks[self.set_of(block)]:
+            return True
+        return self.victim is not None and block in self.victim
 
     def is_dirty(self, block: int) -> bool:
         """True if ``block`` is resident and dirty."""
@@ -358,6 +483,10 @@ class Cache:
         for way in range(self.associativity):
             if blocks[way] == block:
                 return self._dirty[set_idx][way]
+        if self.victim is not None:
+            line = self.victim.peek(block)
+            if line is not None:
+                return line.dirty
         return False
 
     def mark_dirty(self, block: int) -> bool:
@@ -368,16 +497,24 @@ class Cache:
             if blocks[way] == block:
                 self._dirty[set_idx][way] = True
                 return True
+        if self.victim is not None:
+            line = self.victim.peek(block)
+            if line is not None:
+                return self.victim.replace(line._replace(dirty=True))
         return False
 
     def is_prefetched(self, block: int) -> bool:
         """True if ``block`` is resident and no demand reference has hit it
         since a prefetcher installed it."""
-        set_idx = block % self.num_sets
+        set_idx = self.set_of(block)
         blocks = self._blocks[set_idx]
         for way in range(self.associativity):
             if blocks[way] == block:
                 return self._prefetched[set_idx][way]
+        if self.victim is not None:
+            line = self.victim.peek(block)
+            if line is not None:
+                return line.prefetched
         return False
 
     def clear_prefetched(self, block: int) -> bool:
@@ -386,7 +523,7 @@ class Cache:
         A True return is a prefetch that paid off: this is the first demand
         reference to reach a line the prefetcher fetched.
         """
-        set_idx = block % self.num_sets
+        set_idx = self.set_of(block)
         blocks = self._blocks[set_idx]
         prefetched_bits = self._prefetched[set_idx]
         for way in range(self.associativity):
@@ -394,6 +531,11 @@ class Cache:
                 was_set = prefetched_bits[way]
                 prefetched_bits[way] = False
                 return was_set
+        if self.victim is not None:
+            line = self.victim.peek(block)
+            if line is not None and line.prefetched:
+                self.victim.replace(line._replace(prefetched=False))
+                return True
         return False
 
     def clean(self, block: int) -> bool:
@@ -404,16 +546,27 @@ class Cache:
             if blocks[way] == block:
                 self._dirty[set_idx][way] = False
                 return True
+        if self.victim is not None:
+            line = self.victim.peek(block)
+            if line is not None:
+                return self.victim.replace(line._replace(dirty=False))
         return False
 
     def lines(self) -> Iterator[tuple[int, int, int, bool]]:
-        """Yield ``(set_idx, way, block, dirty)`` for every valid line."""
+        """Yield ``(set_idx, way, block, dirty)`` for every valid line.
+
+        Lines held in the victim buffer are yielded too, with a set index
+        and way of -1, since they are as resident as any other.
+        """
         for set_idx in range(self.num_sets):
             blocks = self._blocks[set_idx]
             dirty_bits = self._dirty[set_idx]
             for way in range(self.associativity):
                 if blocks[way] != EMPTY:
                     yield set_idx, way, blocks[way], dirty_bits[way]
+        if self.victim is not None:
+            for line in self.victim.lines():
+                yield -1, -1, line.block, line.dirty
 
     # -- single-level convenience --------------------------------------------
 
@@ -473,6 +626,7 @@ class Cache:
         self.writebacks = self.writebacks_received = self.writeback_allocations = 0
         self.compulsory_misses = self.capacity_misses = self.conflict_misses = 0
         self.shadow_misses = self.anti_conflict_hits = 0
+        self.victim_hits = 0
 
     # -- derived stats ----------------------------------------------------------
 

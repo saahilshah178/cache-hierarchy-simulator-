@@ -141,6 +141,18 @@ rate stays a statement about demand references and the AMAT identity
 stays exact. Prefetch lookups also leave the replacement state of the
 levels below untouched.
 
+Victim caches
+-------------
+
+``victim_cache`` gives a level a small fully-associative buffer of the
+lines its array has replaced (Jouppi, ISCA 1990; see
+``cachesim.cache.VictimBuffer``). The buffer is part of the level: it is
+probed with the tag array, a block found there counts as a hit at that
+level and is charged the level's hit time, and only the line the buffer
+itself pushes out actually leaves. A handful of entries removes most of
+the conflict misses of a direct-mapped cache, which is why the counter to
+watch is ``victim_hits`` beside the level's own miss count.
+
 Main memory
 -----------
 
@@ -358,6 +370,7 @@ class Hierarchy:
         self._prefetch_levels = tuple(
             i for i, level in enumerate(levels) if level.prefetcher is not None
         )
+        self._has_victim = any(level.cache.victim is not None for level in levels)
 
         # --- statistics ---
         self.accesses = 0
@@ -389,6 +402,7 @@ class Hierarchy:
                     track_3c=level.track_3c,
                     rng_seed=level.rng_seed,
                     index=level.index,
+                    victim_entries=level.victim_cache,
                 )
             except ValueError as exc:
                 raise ConfigError(str(exc)) from None
@@ -455,6 +469,12 @@ class Hierarchy:
             time += level.hit_time  # pay to probe this level
             if level.cache.probe(block, write):
                 hit_level = i
+                if self._has_victim:
+                    # A victim-buffer hit swapped a line back into the array
+                    # and may have pushed another out of the level.
+                    displaced = level.cache.take_pending_eviction()
+                    if displaced is not None:
+                        self._handle_eviction(i, displaced)
                 if write:
                     taken = fill_from = i  # it is already here; nothing to fill
                     if level.write_through:

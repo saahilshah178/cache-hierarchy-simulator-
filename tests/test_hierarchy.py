@@ -7,9 +7,10 @@ import os
 import random
 import unittest
 
-from cachesim.cache import Cache
+from cachesim.cache import Cache, VictimBuffer
 from cachesim.config import DEFAULT_CONFIG, load_config
 from cachesim.hierarchy import Hierarchy, Level
+from cachesim.workloads import conflict_streams
 
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs")
 
@@ -86,6 +87,141 @@ class TestExampleConfigs(unittest.TestCase):
 
         on_disk = parse_config(load_config(os.path.join(CONFIG_DIR, "default.json")))
         self.assertEqual(on_disk, parse_config(DEFAULT_CONFIG))
+
+
+class TestVictimCache(unittest.TestCase):
+    """A fully-associative buffer of the lines a level's array has replaced
+    (Jouppi, ISCA 1990). A hit there is a hit at the level: the buffer is
+    part of it, probed with the tag array and charged the same hit time."""
+
+    def two_block_cache(self, entries: int | None) -> Hierarchy:
+        """Direct-mapped, 2 sets: blocks 0 and 2 collide in set 0."""
+        cache = Cache("L1", 128, 64, 1, victim_entries=entries)
+        return Hierarchy([Level(cache, 4)], memory_access_time=100)
+
+    def test_a_swapping_pair_stops_missing(self) -> None:
+        """Blocks 0 and 2 map to the same set and evict each other on every
+        reference. With a two-entry buffer, each eviction is caught and the
+        next reference swaps the block straight back: two compulsory misses
+        and then nothing but hits."""
+        plain = self.two_block_cache(None)
+        victim = self.two_block_cache(2)
+        for _ in range(8):
+            for block in (0, 2):
+                plain.access(block * 64)
+                victim.access(block * 64)
+        self.assertEqual(plain.levels[0].cache.misses, 16)
+        c = victim.levels[0].cache
+        self.assertEqual(c.misses, 2)
+        self.assertEqual(c.victim_hits, 14)
+        self.assertEqual(c.hits, 14)  # a victim hit is a hit at this level
+        self.assertEqual(victim.access(0), 4)  # ... and costs the level's hit time
+        self.assertAlmostEqual(victim.amat(), victim.measured_amat(), places=9)
+
+    def test_conflict_streams_reach_the_compulsory_floor(self) -> None:
+        """The conflict workload reads four streams whose addresses are 1 MB
+        apart, so all four land in one set: a direct-mapped cache misses on
+        every single access. Three buffer entries hold the three blocks the
+        array cannot, and the miss count drops to the 8,192 compulsory
+        misses -- everything a fully-associative cache of any size would
+        also have taken. Two entries are one short and change nothing."""
+        stream = [(addr, op == "W") for addr, op in conflict_streams()]
+        misses = {}
+        for entries in (None, 2, 3, 4):
+            h = Hierarchy(
+                [Level(Cache("L1", 32768, 64, 1, victim_entries=entries), 4)],
+                memory_access_time=100,
+            )
+            for addr, is_write in stream:
+                h.access(addr, is_write)
+            misses[entries] = h.levels[0].cache.misses
+            self.assertEqual(h.levels[0].cache.compulsory_misses, 8192)
+        self.assertEqual(misses[None], 65536)
+        self.assertEqual(misses[2], 65536)
+        self.assertEqual(misses[3], 8192)
+        self.assertEqual(misses[4], 8192)
+
+    def test_a_buffered_line_is_still_resident(self) -> None:
+        h = self.two_block_cache(2)
+        c = h.levels[0].cache
+        h.access(0)
+        h.access(2 * 64)  # evicts block 0 into the buffer
+        self.assertTrue(c.contains(0))
+        self.assertEqual(sorted(b for _, _, b, _ in c.lines()), [0, 2])
+
+    def test_a_dirty_line_is_written_back_only_when_it_leaves_the_level(self) -> None:
+        h = self.two_block_cache(1)
+        c = h.levels[0].cache
+        h.access(0, is_write=True)  # block 0 dirty in the array
+        h.access(2 * 64)  # array evicts it into the buffer: not a write-back
+        self.assertEqual((c.writebacks, h.dram_writes), (0, 0))
+        self.assertTrue(c.is_dirty(0))
+        h.access(4 * 64)  # block 4 also maps to set 0; block 0 is pushed out
+        self.assertEqual((c.writebacks, h.dram_writes), (1, 1))
+        self.assertFalse(c.contains(0))
+
+    def test_flush_reaches_lines_in_the_buffer(self) -> None:
+        h = self.two_block_cache(2)
+        h.access(0, is_write=True)
+        h.access(2 * 64, is_write=True)  # block 0, dirty, is now in the buffer
+        self.assertEqual(h.flush(), 2)
+        self.assertEqual(h.dram_writes, 2)
+        self.assertEqual(h.flush(), 0)
+
+    def test_config_accepts_a_count_or_an_object(self) -> None:
+        from cachesim.config import ConfigError, parse_config
+
+        def config(victim: object) -> dict[str, object]:
+            return {
+                "memory_access_time": 10,
+                "levels": [
+                    {
+                        "name": "L1",
+                        "size": 1024,
+                        "block_size": 64,
+                        "associativity": 1,
+                        "hit_time": 1,
+                        "victim_cache": victim,
+                    }
+                ],
+            }
+
+        self.assertEqual(parse_config(config(4)).levels[0].victim_cache, 4)
+        self.assertEqual(parse_config(config({"entries": 4})).levels[0].victim_cache, 4)
+        spec = parse_config(config({"entries": 4}))
+        self.assertEqual(parse_config(spec.to_dict()), spec)  # round-trips as a count
+        for bad, fragment in (
+            (0, "must be >= 1"),
+            ({"size": 4}, "unknown key(s) 'size'"),
+            ({}, "missing required key 'entries'"),
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError) as ctx:
+                parse_config(config(bad))
+            self.assertIn(fragment, str(ctx.exception))
+
+    def test_default_is_no_victim_cache(self) -> None:
+        self.assertIsNone(Cache("L1", 1024, 64, 2).victim)
+        self.assertIsNone(self.two_block_cache(None).stats().levels[0].victim_cache_entries)
+
+    def test_entries_are_validated(self) -> None:
+        for entries in (0, -1, "four"):
+            with self.subTest(entries=entries), self.assertRaises(ValueError):
+                VictimBuffer(entries)  # type: ignore[arg-type]
+
+    def test_it_composes_with_the_rest_of_the_hierarchy(self) -> None:
+        rng = random.Random(37)
+        h = Hierarchy(
+            [
+                Level(Cache("L1", 512, 64, 1, victim_entries=4), 4, prefetcher="next-line"),
+                Level(Cache("L2", 4096, 64, 4, victim_entries=2), 12, inclusion="inclusive"),
+            ],
+            memory_access_time=100,
+        )
+        for _ in range(5000):
+            h.access(rng.randrange(0, 1 << 14), is_write=rng.random() < 0.3)
+            h.check_inclusion()
+        self.assertGreater(h.levels[0].cache.victim_hits, 0)
+        h.flush()
 
 
 class TestWritebackPropagation(unittest.TestCase):
