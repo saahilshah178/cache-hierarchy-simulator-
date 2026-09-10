@@ -581,12 +581,45 @@ lfu         181,125    34.02%    38.02   14.92
 fully associative Belady bound: 2,184 misses (0.41%)  -- the set mapping costs everything above this
 ```
 
-**One level only.** `simulate_with_opt(trace_accesses, config)` drives a hierarchy in
-which exactly one level asks for `opt`. Two or more such levels is a `ConfigError` from
-`parse_config` and from `simulate_with_opt`; none at all is a `ConfigError` from
-`simulate_with_opt`, which names `Hierarchy.from_config` as the alternative. Two passes
-are needed, because the stream OPT needs is not the trace: an access reaches level L only
-if every level above it missed.
+**One level only.** `simulate_with_opt(trace_accesses, config, warmup=0)` drives a
+hierarchy in which exactly one level asks for `opt`. Two or more such levels is a
+`ConfigError` from `parse_config` and from `simulate_with_opt`; none at all is a
+`ConfigError` from `simulate_with_opt`, which names `Hierarchy.from_config` as the
+alternative. `warmup` accesses are simulated before the statistics are reset, exactly as
+in `run_trace`; OPT still optimises against the whole stream, warm-up prefix included,
+since the future it is given does not change.
+
+`run_trace` detects an OPT level and calls `simulate_with_opt` in its place instead of
+driving a plain `Hierarchy`, and `cachesim run` and `cachesim compare` reach that check
+through `run_trace` and the equivalent path in `cachesim/compare.py`, so a configuration
+with an OPT level needs no special invocation:
+
+```bash
+python - <<'PY'
+from cachesim import parse_trace, run_trace, simulate_with_opt
+
+config = {
+    "memory_access_time": 100,
+    "levels": [
+        {"name": "L1", "size": 8192, "block_size": 64, "associativity": 2, "hit_time": 4},
+        {"name": "L2", "size": 32768, "block_size": 64, "associativity": 4,
+         "hit_time": 12, "policy": "opt"},
+    ],
+}
+via_run_trace = run_trace("traces/matmul_naive.trace", config)
+via_direct = simulate_with_opt(list(parse_trace("traces/matmul_naive.trace")), config)
+print("run_trace         L2 misses %d" % via_run_trace.levels[1].cache.misses)
+print("simulate_with_opt L2 misses %d" % via_direct.levels[1].cache.misses)
+PY
+```
+
+```text
+run_trace         L2 misses 11650
+simulate_with_opt L2 misses 11650
+```
+
+Two passes are needed, because the stream OPT needs is not the trace: an access reaches
+level L only if every level above it missed.
 
 * **Pass 1** runs the hierarchy with LRU substituted at level L and records the block of
   every probe L receives.
@@ -604,14 +637,20 @@ That is also why a second OPT level is refused: OPT at L changes L's misses, hen
 stream L+1 sees, so a stream recorded for L+1 while L ran LRU would be wrong. Two OPT
 levels would need a fixed point, not two passes.
 
-Pass 1 rebuilds the OPT level with its geometry, index function and hit time but with
-default inclusion, write and bus settings. Declaring `inclusion: inclusive` on the OPT
-level therefore makes the two passes disagree about what L-1 holds, and the divergence is
-caught by `on_probe`'s cursor check rather than being absorbed silently:
+Pass 1 keeps every other setting the OPT level was given — geometry, index function, hit
+time, victim buffer, bus width, prefetcher, write policy — and substitutes `lru` for
+`policy`; only the level's `Cache` object is then swapped for a `_ProbeRecorder` built
+from the same geometry, index function and victim buffer, so nothing about the level's
+behaviour changes at the swap except that every probe is now also appended to a list.
+Inclusion is the one setting OPT cannot combine with: `_opt_level` requires the OPT
+level itself to declare `inclusion: nine` and refuses any `inclusion: inclusive` level
+below it, because either would let a lower level's eviction reach back up into the levels
+above L and change the very stream pass 1 is recording. The check runs before either pass
+starts, and raises `ConfigError` naming the offending level:
 
 ```bash
 python - <<'PY'
-from cachesim import parse_trace, simulate_with_opt
+from cachesim import ConfigError, parse_trace, simulate_with_opt
 
 accesses = list(parse_trace("traces/random.trace"))[:20000]
 config = {
@@ -625,17 +664,17 @@ config = {
 try:
     h = simulate_with_opt(accesses, config)
     print("completed, L2 misses", h.levels[1].cache.misses)
-except RuntimeError as exc:
-    print("RuntimeError:", str(exc)[:200])
+except ConfigError as exc:
+    print("ConfigError:", exc)
 PY
 ```
 
 ```text
-RuntimeError: policy 'opt': the preloaded reference stream does not match the simulation at reference 1791: expected block 4454988, got block 4256891
+ConfigError: L2: policy 'opt' needs inclusion 'nine', got 'inclusive'; an inclusive or exclusive level changes the levels above it, so its reference stream cannot be recorded in advance
 ```
 
-Combine `opt` with a non-default inclusion policy on the same level only if that error is
-acceptable; the combination is not supported.
+The same two conditions govern every OPT configuration, not only this constructed
+example, and both are caught before either pass runs rather than mid-simulation.
 
 ```bash
 python - <<'PY'
