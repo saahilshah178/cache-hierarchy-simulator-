@@ -11,6 +11,10 @@ A configuration is a JSON object of the form::
       ]
     }
 
+Optional per-level keys: ``policy`` (default ``"lru"``), ``index``
+(``"modulo"`` or ``"xor"``, default ``"modulo"``), ``track_3c`` (default
+true) and ``rng_seed`` (default 0).
+
 ``parse_config`` turns such a dict into a ``HierarchySpec`` and rejects
 anything malformed with a ``ConfigError`` whose message names the offending
 key (for example ``levels[1] (L2): unknown key 'assoc'``).
@@ -24,6 +28,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
 from typing import Any
 
+from cachesim.indexing import DEFAULT_INDEX, INDEX_FUNCTIONS
 from cachesim.policies import POLICIES
 
 
@@ -43,6 +48,7 @@ class CacheSpec:
     policy: str = "lru"
     track_3c: bool = True
     rng_seed: int = 0
+    index: str = DEFAULT_INDEX
 
 
 @dataclass(frozen=True)
@@ -153,6 +159,16 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
     if not isinstance(track_3c, bool):
         raise ConfigError(f"{where}: 'track_3c' must be true or false, got {track_3c!r}")
 
+    index = spec.get("index", DEFAULT_INDEX)
+    if not isinstance(index, str):
+        raise ConfigError(f"{where}: 'index' must be a string, got {index!r}")
+    index = index.lower()
+    if index not in INDEX_FUNCTIONS:
+        raise ConfigError(
+            f"{where}: unknown index function {index!r}; "
+            f"choose from {', '.join(sorted(INDEX_FUNCTIONS))}"
+        )
+
     return CacheSpec(
         name=name,
         size=_require_int(where, "size", spec["size"], 1),
@@ -162,6 +178,7 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
         policy=policy,
         track_3c=track_3c,
         rng_seed=_require_int(where, "rng_seed", spec.get("rng_seed", 0), -(1 << 63)),
+        index=index,
     )
 
 

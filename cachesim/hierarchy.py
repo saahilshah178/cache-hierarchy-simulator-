@@ -101,6 +101,7 @@ class Hierarchy:
                     policy=level.policy,
                     track_3c=level.track_3c,
                     rng_seed=level.rng_seed,
+                    index=level.index,
                 )
             except ValueError as exc:
                 raise ConfigError(str(exc)) from None

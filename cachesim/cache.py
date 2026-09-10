@@ -7,8 +7,9 @@ One level of a cache (an L1, an L2, ...) is modelled as a grid of
   ``block_size`` bytes. Addresses are converted to block numbers
   (``addr // block_size``) at the boundary; everything inside works on
   block numbers.
-* A block maps to exactly one set (``block % num_sets``) and may occupy any
-  way of that set.
+* A block maps to exactly one set, chosen by the level's index function
+  (``block % num_sets`` by default; see ``cachesim.indexing``), and may
+  occupy any way of that set.
 
     - associativity == 1                    -> direct-mapped
     - associativity == blocks in the cache  -> fully associative
@@ -65,6 +66,7 @@ from collections import OrderedDict
 from collections.abc import Iterator
 from typing import NamedTuple
 
+from cachesim.indexing import DEFAULT_INDEX, INDEX_FUNCTIONS, IndexFunction, make_index
 from cachesim.policies import POLICIES, ReplacementPolicy
 
 #: Block-number sentinel for an empty way. Real block numbers are >= 0.
@@ -117,6 +119,8 @@ class Cache:
     track_3c      : run the shadow fully-associative cache and classify
                     misses into compulsory / capacity / conflict.
     rng_seed      : seed for the random policy.
+    index         : set-index function name (see ``indexing.INDEX_FUNCTIONS``);
+                    "modulo" is the plain low-order-bits mapping.
     """
 
     def __init__(
@@ -128,6 +132,7 @@ class Cache:
         policy: str = "lru",
         track_3c: bool = True,
         rng_seed: int = 0,
+        index: str = DEFAULT_INDEX,
     ) -> None:
         _validate_geometry(name, size, block_size, associativity)
 
@@ -138,6 +143,21 @@ class Cache:
         self.num_sets = size // (block_size * associativity)
         self.num_blocks = size // block_size
         self.policy_name = policy
+        self.index_name = index
+
+        # The default mapping is inlined in the primitives below, so plain
+        # modulo indexing costs no call at all; anything else goes through
+        # the function built here.
+        if index not in INDEX_FUNCTIONS:
+            raise ValueError(
+                f"{name}: unknown index function {index!r}; choose from {sorted(INDEX_FUNCTIONS)}"
+            )
+        self._index_fn: IndexFunction | None = None
+        if index != DEFAULT_INDEX:
+            try:
+                self._index_fn = make_index(index, self.num_sets)
+            except ValueError as exc:
+                raise ValueError(f"{name}: {exc}") from None
 
         if isinstance(rng_seed, bool) or not isinstance(rng_seed, int):
             raise ValueError(f"{name}: rng_seed must be an integer, got {rng_seed!r}")
@@ -193,11 +213,17 @@ class Cache:
         return addr // self.block_size
 
     def set_of(self, block: int) -> int:
-        """The set index a block maps to."""
-        return block % self.num_sets
+        """The set index a block maps to, under this level's index function."""
+        index = self._index_fn
+        return block % self.num_sets if index is None else index(block)
 
     def tag_of(self, block: int) -> int:
-        """The tag that distinguishes blocks sharing a set."""
+        """The tag that distinguishes blocks sharing a set.
+
+        Only meaningful for the default modulo mapping: a hashed index is
+        not a bit-field of the block number, so hardware using one stores
+        the whole block number (or a wider tag) instead.
+        """
         return block // self.num_sets
 
     # -- primitives ------------------------------------------------------------
@@ -209,7 +235,8 @@ class Cache:
         write hit, and the 3-C classification on a miss. Does not fill: on a
         miss the caller decides whether and how to ``allocate``.
         """
-        set_idx = block % self.num_sets
+        index = self._index_fn
+        set_idx = block % self.num_sets if index is None else index(block)
         blocks = self._blocks[set_idx]
         # At most ``ways`` comparisons, like the parallel tag comparators of
         # real hardware.
@@ -243,7 +270,8 @@ class Cache:
         block is already present this is a no-op (the dirty bit is OR-ed in)
         and None is returned.
         """
-        set_idx = block % self.num_sets
+        index = self._index_fn
+        set_idx = block % self.num_sets if index is None else index(block)
         blocks = self._blocks[set_idx]
         dirty_bits = self._dirty[set_idx]
 
@@ -276,7 +304,7 @@ class Cache:
         Counts as an invalidation, not an eviction; a dirty line still
         counts as a write-back because its data must be written down.
         """
-        set_idx = block % self.num_sets
+        set_idx = self.set_of(block)
         blocks = self._blocks[set_idx]
         for way in range(self.associativity):
             if blocks[way] == block:
@@ -292,11 +320,11 @@ class Cache:
 
     def contains(self, block: int) -> bool:
         """True if ``block`` is currently resident (no statistics updated)."""
-        return block in self._blocks[block % self.num_sets]
+        return block in self._blocks[self.set_of(block)]
 
     def is_dirty(self, block: int) -> bool:
         """True if ``block`` is resident and dirty."""
-        set_idx = block % self.num_sets
+        set_idx = self.set_of(block)
         blocks = self._blocks[set_idx]
         for way in range(self.associativity):
             if blocks[way] == block:
@@ -305,7 +333,7 @@ class Cache:
 
     def mark_dirty(self, block: int) -> bool:
         """Set the dirty bit of a resident block. Returns False if absent."""
-        set_idx = block % self.num_sets
+        set_idx = self.set_of(block)
         blocks = self._blocks[set_idx]
         for way in range(self.associativity):
             if blocks[way] == block:
@@ -315,7 +343,7 @@ class Cache:
 
     def clean(self, block: int) -> bool:
         """Clear the dirty bit of a resident block. Returns False if absent."""
-        set_idx = block % self.num_sets
+        set_idx = self.set_of(block)
         blocks = self._blocks[set_idx]
         for way in range(self.associativity):
             if blocks[way] == block:
