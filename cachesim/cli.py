@@ -164,6 +164,12 @@ def _register_compare(subparsers: Subparsers) -> None:
     register(subparsers)
 
 
+def _register_sets(subparsers: Subparsers) -> None:
+    from cachesim.setpressure import register
+
+    register(subparsers)
+
+
 #: Subcommand registration functions, in the order shown by --help.
 COMMANDS: list[Callable[[Subparsers], None]] = [
     register_run,
@@ -172,6 +178,7 @@ COMMANDS: list[Callable[[Subparsers], None]] = [
     _register_policies,
     _register_mrc,
     _register_compare,
+    _register_sets,
     register_gen_traces,
 ]
 
