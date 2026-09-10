@@ -152,12 +152,19 @@ def _register_policies(subparsers: Subparsers) -> None:
     register(subparsers)
 
 
+def _register_mrc(subparsers: Subparsers) -> None:
+    from cachesim.stackdist import register
+
+    register(subparsers)
+
+
 #: Subcommand registration functions, in the order shown by --help.
 COMMANDS: list[Callable[[Subparsers], None]] = [
     register_run,
     register_trace_stats,
     _register_sweep,
     _register_policies,
+    _register_mrc,
     register_gen_traces,
 ]
 

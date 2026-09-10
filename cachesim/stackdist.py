@@ -57,8 +57,16 @@ those. The profile is exact, not sampled.
 
 from __future__ import annotations
 
+import argparse
+import csv
+import os
+import sys
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from typing import Any
+
+from cachesim.plot import MatplotlibUnavailable, format_bytes, plot_mrc
+from cachesim.trace import parse_trace
 
 #: Stack distance reported for the first reference to a block. Real
 #: distances are >= 0, so any negative sentinel is unambiguous.
@@ -424,3 +432,285 @@ def power_of_two_capacities(limit: int) -> list[int]:
     while capacities[-1] < limit:
         capacities.append(capacities[-1] * 2)
     return capacities
+
+
+# -- the `mrc` command ---------------------------------------------------------
+
+
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {text}")
+    return value
+
+
+def _load_blocks(parser: argparse.ArgumentParser, path: str, block_size: int) -> list[int]:
+    """Read a trace into a block stream, turning problems into CLI errors."""
+    try:
+        blocks = block_stream(parse_trace(path), block_size)
+    except FileNotFoundError:
+        parser.error(f"trace not found: {path} (run `cachesim gen-traces` to create the samples)")
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
+    if not blocks:
+        parser.error(f"no accesses in {path}")
+    return blocks
+
+
+@dataclass(frozen=True)
+class MrcRow:
+    """One point of a miss-ratio curve, as tabulated and written to CSV.
+
+    ``ways`` and ``num_sets`` describe the geometry that achieves this
+    capacity: a fully-associative point is ``num_sets == 1`` with
+    ``ways == capacity``. ``conflict`` is the Hill-Smith aggregate conflict
+    count, ``misses`` minus the fully-associative misses at the same
+    capacity, and is 0 by construction on a fully-associative row.
+    """
+
+    num_sets: int
+    ways: int
+    capacity: int
+    capacity_bytes: int
+    misses: int
+    miss_ratio: float
+    conflict: int
+
+
+def mrc_rows(
+    profile: StackDistanceProfile, capacities: Sequence[int], block_size: int
+) -> list[MrcRow]:
+    """Tabulate the fully-associative miss curve at ``capacities``."""
+    return [
+        MrcRow(
+            num_sets=1,
+            ways=capacity,
+            capacity=capacity,
+            capacity_bytes=capacity * block_size,
+            misses=profile.misses(capacity),
+            miss_ratio=profile.miss_ratio(capacity),
+            conflict=0,
+        )
+        for capacity in capacities
+    ]
+
+
+def set_associative_rows(
+    per_set: SetAssociativeProfile,
+    flat: StackDistanceProfile,
+    ways_values: Sequence[int],
+    block_size: int,
+) -> list[MrcRow]:
+    """Tabulate the set-associative miss curve at ``ways_values``.
+
+    Each row is compared against the fully-associative curve at the same
+    total capacity, so ``conflict`` isolates the cost of the set mapping.
+    """
+    rows = []
+    for ways in ways_values:
+        capacity = per_set.num_sets * ways
+        misses = per_set.misses(ways)
+        rows.append(
+            MrcRow(
+                num_sets=per_set.num_sets,
+                ways=ways,
+                capacity=capacity,
+                capacity_bytes=capacity * block_size,
+                misses=misses,
+                miss_ratio=per_set.miss_ratio(ways),
+                conflict=misses - flat.misses(capacity),
+            )
+        )
+    return rows
+
+
+def write_csv(path: str, rows: Sequence[MrcRow]) -> None:
+    """Write miss-curve rows as CSV: one header, one line per point."""
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "sets",
+                "ways",
+                "capacity_blocks",
+                "capacity_bytes",
+                "misses",
+                "miss_ratio",
+                "conflict",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.num_sets,
+                    row.ways,
+                    row.capacity,
+                    row.capacity_bytes,
+                    row.misses,
+                    f"{row.miss_ratio:.6f}",
+                    row.conflict,
+                ]
+            )
+
+
+def _print_curve(rows: Sequence[MrcRow], show_ways: bool) -> None:
+    """Print a miss-curve table; ``show_ways`` adds the associativity columns."""
+    if show_ways:
+        print(
+            f"{'ways':>5} {'capacity':>9} {'size':>9} "
+            f"{'misses':>12} {'miss rate':>10} {'conflict':>10}"
+        )
+    else:
+        print(f"{'capacity':>9} {'size':>9} {'misses':>12} {'miss rate':>10}")
+    for row in rows:
+        size = format_bytes(row.capacity_bytes)
+        if show_ways:
+            print(
+                f"{row.ways:>5} {row.capacity:>9,} {size:>9} "
+                f"{row.misses:>12,} {row.miss_ratio:>9.2%} {row.conflict:>10,}"
+            )
+        else:
+            print(f"{row.capacity:>9,} {size:>9} {row.misses:>12,} {row.miss_ratio:>9.2%}")
+
+
+def _print_reuse_histogram(profile: StackDistanceProfile) -> None:
+    """Print the power-of-two reuse-distance histogram with a share bar."""
+    histogram = profile.reuse_histogram()
+    entries: list[tuple[str, int]] = []
+    for bucket in histogram.buckets:
+        label = f"{bucket.low}" if bucket.high == bucket.low else f"{bucket.low}-{bucket.high}"
+        entries.append((label, bucket.count))
+    entries.append(("infinite", histogram.infinite))
+    widest = max((count for _, count in entries), default=0)
+    print(f"{'distance':>12} {'refs':>12} {'share':>8}")
+    for label, count in entries:
+        share = count / profile.references if profile.references else 0.0
+        bar = "#" * round(40 * count / widest) if widest else ""
+        print(f"{label:>12} {count:>12,} {share:>7.2%}  {bar}")
+
+
+def add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the ``mrc`` options to ``parser``."""
+    parser.add_argument("trace", help="trace file (one 'ADDR R|W' per line)")
+    parser.add_argument(
+        "--block-size", type=_positive_int, default=64, help="block size in bytes (default 64)"
+    )
+    parser.add_argument(
+        "--sets",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help="also profile a cache with N sets, giving misses for every associativity",
+    )
+    parser.add_argument(
+        "--max-capacity",
+        type=_positive_int,
+        default=None,
+        metavar="BLOCKS",
+        help="largest capacity to tabulate, in blocks "
+        "(default: the smallest power of two that reaches the compulsory floor)",
+    )
+    parser.add_argument("--csv", metavar="FILE", help="write the curve(s) to FILE as CSV")
+    parser.add_argument("--plot", metavar="FILE", help="write the miss-ratio curve to FILE")
+
+
+def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    """Execute the ``mrc`` command from parsed arguments."""
+    blocks = _load_blocks(parser, args.trace, args.block_size)
+    profile = stack_distance_profile(blocks)
+
+    limit = profile.max_distance + 1
+    if args.max_capacity is not None:
+        limit = min(limit, args.max_capacity)
+    capacities = [c for c in power_of_two_capacities(limit) if c <= (args.max_capacity or c)]
+
+    print(f"trace: {args.trace}")
+    print(
+        f"references: {profile.references:,}   "
+        f"distinct {args.block_size} B blocks: {profile.distinct_blocks:,}   "
+        f"compulsory floor: {profile.compulsory_ratio:.2%}"
+    )
+
+    rows = mrc_rows(profile, capacities, args.block_size)
+    print("\nfully-associative LRU miss curve")
+    _print_curve(rows, show_ways=False)
+
+    working_set = profile.working_set_size()
+    print(
+        f"\nworking set: {working_set:,} blocks "
+        f"({format_bytes(working_set * args.block_size)}) "
+        f"-- the smallest capacity within 1 percentage point of the floor"
+    )
+
+    print("\nreuse-distance histogram")
+    _print_reuse_histogram(profile)
+
+    set_rows: list[MrcRow] = []
+    if args.sets is not None:
+        per_set = per_set_profile(blocks, args.sets)
+        ways_limit = per_set.profile.max_distance + 1
+        if args.max_capacity is not None:
+            ways_limit = min(ways_limit, max(args.max_capacity // args.sets, 1))
+        ways_values = power_of_two_capacities(ways_limit)
+        set_rows = set_associative_rows(per_set, profile, ways_values, args.block_size)
+        print(f"\nset-associative LRU miss curve, {args.sets:,} sets")
+        _print_curve(set_rows, show_ways=True)
+        print(
+            "conflict = misses minus the fully-associative misses at the same capacity "
+            "(Hill-Smith aggregate)"
+        )
+
+    if args.csv:
+        write_csv(args.csv, rows + set_rows)
+        print(f"\nwrote {args.csv}")
+
+    if args.plot:
+        extra: list[tuple[str, Sequence[int], Sequence[float]]] = []
+        if set_rows:
+            extra.append(
+                (
+                    f"{args.sets:,}-set",
+                    [row.capacity for row in set_rows],
+                    [row.miss_ratio for row in set_rows],
+                )
+            )
+        try:
+            written = plot_mrc(
+                [row.capacity for row in rows],
+                [row.miss_ratio for row in rows],
+                args.plot,
+                title=f"Miss-ratio curve (LRU)\n{os.path.basename(args.trace)}, "
+                f"{args.block_size} B blocks",
+                extra=extra,
+            )
+        except MatplotlibUnavailable as exc:
+            print(f"\n({exc})")
+        else:
+            print(f"wrote {written}")
+    return 0
+
+
+def register(subparsers: Any) -> None:
+    """Register the ``mrc`` subcommand with the ``cachesim`` CLI."""
+    parser = subparsers.add_parser(
+        "mrc", help="miss-ratio curve: misses at every capacity, from one pass"
+    )
+    add_arguments(parser)
+    parser.set_defaults(func=lambda args: run(args, parser))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Stand-alone entry point (``python -m cachesim.stackdist``)."""
+    parser = argparse.ArgumentParser(
+        prog="cachesim mrc",
+        description="Miss-ratio curve of a trace, from a Mattson stack-distance profile.",
+    )
+    add_arguments(parser)
+    return run(parser.parse_args(argv), parser)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

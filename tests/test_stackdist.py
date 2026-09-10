@@ -10,16 +10,23 @@ against each other.
 
 from __future__ import annotations
 
+import contextlib
+import csv
+import io
 import itertools
+import os
 import random
+import tempfile
 import unittest
 from collections.abc import Iterable, Iterator
 
+from cachesim import plot
 from cachesim.cache import Cache
 from cachesim.stackdist import (
     INFINITE,
     ReuseBucket,
     block_stream,
+    main,
     miss_ratio_curve,
     per_set_profile,
     power_of_two_capacities,
@@ -33,6 +40,7 @@ from cachesim.workloads import (
     pointer_chase,
     random_access,
     sequential,
+    write_trace,
 )
 
 BLOCK = 64
@@ -317,6 +325,157 @@ class TestPowerOfTwoCapacities(unittest.TestCase):
         self.assertEqual(power_of_two_capacities(5), [1, 2, 4, 8])
         self.assertEqual(power_of_two_capacities(8), [1, 2, 4, 8])
         self.assertEqual(power_of_two_capacities(0), [1])
+
+
+class TestMrcCli(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.trace = os.path.join(self._tmp.name, "c.trace")
+        write_trace(self.trace, conflict_streams(streams=4, words_per_stream=256))
+        self.blocks = blocks_of(conflict_streams(streams=4, words_per_stream=256))
+
+    def run_main(self, argv: list[str]) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = main(argv)
+            except SystemExit as exc:
+                code = int(exc.code) if exc.code is not None else 0
+        return code, out.getvalue(), err.getvalue()
+
+    def test_prints_the_curve_and_the_working_set(self) -> None:
+        code, out, _ = self.run_main([self.trace])
+        self.assertEqual(code, 0)
+        self.assertIn("fully-associative LRU miss curve", out)
+        self.assertIn("reuse-distance histogram", out)
+        self.assertIn("working set:", out)
+        # 1,024 references over 128 distinct blocks: the floor is 128 misses.
+        self.assertIn("references: 1,024", out)
+        self.assertIn("distinct 64 B blocks: 128", out)
+
+    def test_sets_adds_the_associativity_curve(self) -> None:
+        code, out, _ = self.run_main([self.trace, "--sets", "64"])
+        self.assertEqual(code, 0)
+        self.assertIn("set-associative LRU miss curve, 64 sets", out)
+        self.assertIn("conflict", out)
+
+    def test_csv_matches_the_profile(self) -> None:
+        path = os.path.join(self._tmp.name, "mrc.csv")
+        code, _, _ = self.run_main([self.trace, "--sets", "64", "--csv", path])
+        self.assertEqual(code, 0)
+        with open(path, newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        profile = stack_distance_profile(self.blocks)
+        per_set = per_set_profile(self.blocks, 64)
+        self.assertTrue(rows)
+        for row in rows:
+            capacity = int(row["capacity_blocks"])
+            expected = (
+                profile.misses(capacity)
+                if int(row["sets"]) == 1
+                else per_set.misses(int(row["ways"]))
+            )
+            self.assertEqual(int(row["misses"]), expected, row)
+            self.assertEqual(int(row["capacity_bytes"]), capacity * 64)
+
+    def test_default_table_stops_at_the_compulsory_floor(self) -> None:
+        """Three other streams sit between reuses, so no distance exceeds 3.
+
+        The default curve therefore ends at 4 blocks, where every reuse hits
+        and only the 128 first touches remain.
+        """
+        self.assertEqual(self.capacities_in_table([]), [1, 2, 4])
+        self.assertEqual(stack_distance_profile(self.blocks).max_distance, 3)
+
+    def test_max_capacity_truncates_the_table(self) -> None:
+        self.assertEqual(self.capacities_in_table(["--max-capacity", "2"]), [1, 2])
+
+    def capacities_in_table(self, extra: list[str]) -> list[int]:
+        """The capacity column of the fully-associative table, in order."""
+        code, out, _ = self.run_main([self.trace, *extra])
+        self.assertEqual(code, 0)
+        body = out.split("fully-associative LRU miss curve")[1].split("working set")[0]
+        capacities = []
+        for line in body.splitlines():
+            fields = line.split()
+            if fields and fields[0].replace(",", "").isdigit():
+                capacities.append(int(fields[0].replace(",", "")))
+        return capacities
+
+    def test_missing_trace_is_reported(self) -> None:
+        code, _, err = self.run_main([os.path.join(self._tmp.name, "nope.trace")])
+        self.assertEqual(code, 2)
+        self.assertIn("trace not found", err)
+
+    def test_empty_trace_is_rejected(self) -> None:
+        path = os.path.join(self._tmp.name, "empty.trace")
+        with open(path, "w") as handle:
+            handle.write("# nothing here\n")
+        code, _, err = self.run_main([path])
+        self.assertEqual(code, 2)
+        self.assertIn("no accesses", err)
+
+    def test_bad_flags_fail_with_a_message(self) -> None:
+        for argv, fragment in [
+            ([self.trace, "--block-size", "0"], "positive integer"),
+            ([self.trace, "--sets", "0"], "positive integer"),
+            ([self.trace, "--max-capacity", "-1"], "positive integer"),
+        ]:
+            with self.subTest(argv=argv):
+                code, _, err = self.run_main(argv)
+                self.assertEqual(code, 2)
+                self.assertIn(fragment, err)
+
+
+@unittest.skipUnless(plot.available(), "matplotlib is not installed")
+class TestPlotMrc(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_writes_a_non_empty_file(self) -> None:
+        path = os.path.join(self._tmp.name, "mrc.png")
+        written = plot.plot_mrc([1, 2, 4, 8], [1.0, 0.5, 0.25, 0.125], path)
+        self.assertEqual(written, path)
+        self.assertGreater(os.path.getsize(path), 0)
+
+    def test_extra_series_and_nested_directory(self) -> None:
+        path = os.path.join(self._tmp.name, "nested", "mrc.png")
+        plot.plot_mrc(
+            [1, 2, 4],
+            [1.0, 0.5, 0.25],
+            path,
+            title="test",
+            extra=[("64-set", [2, 4], [0.9, 0.4])],
+        )
+        self.assertGreater(os.path.getsize(path), 0)
+
+    def test_ragged_or_empty_series_are_rejected(self) -> None:
+        path = os.path.join(self._tmp.name, "bad.png")
+        with self.assertRaises(ValueError):
+            plot.plot_mrc([1, 2], [1.0], path)
+        with self.assertRaises(ValueError):
+            plot.plot_mrc([], [], path)
+        with self.assertRaises(ValueError):
+            plot.plot_mrc([1], [1.0], path, extra=[("x", [1, 2], [0.5])])
+
+    def test_cli_writes_a_plot(self) -> None:
+        trace = os.path.join(self._tmp.name, "c.trace")
+        write_trace(trace, conflict_streams(streams=4, words_per_stream=128))
+        path = os.path.join(self._tmp.name, "curve.png")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main([trace, "--sets", "32", "--plot", path]), 0)
+        self.assertGreater(os.path.getsize(path), 0)
+
+
+class TestFormatBytes(unittest.TestCase):
+    def test_units(self) -> None:
+        self.assertEqual(plot.format_bytes(64), "64 B")
+        self.assertEqual(plot.format_bytes(1024), "1 KB")
+        self.assertEqual(plot.format_bytes(32768), "32 KB")
+        self.assertEqual(plot.format_bytes(1536), "1.5 KB")
+        self.assertEqual(plot.format_bytes(2 * 1024 * 1024), "2 MB")
 
 
 if __name__ == "__main__":
