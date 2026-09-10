@@ -58,6 +58,8 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
             extra += f", {lv.write_policy}"
         if not lv.write_allocate:
             extra += ", no-write-allocate"
+        if lv.bus_width is not None:
+            extra += f", {lv.bus_width} B/cyc bus ({lv.transfer_cycles} cyc/block)"
         lines.append(
             f"--- {lv.name}: {_size_str(lv.size)}, {lv.block_size} B blocks, "
             f"{lv.associativity}-way, {lv.policy.upper()}, hit time {lv.hit_time} cyc"
@@ -101,6 +103,10 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
                 f"  write bypasses      : {lv.write_bypasses:>6,}"
                 "   (write misses passed down instead of allocating)"
             )
+        lines.append(
+            f"  traffic     : {_size_str(lv.bytes_read_from_below):>12} in from below"
+            f" / {_size_str(lv.bytes_written_below)} out below"
+        )
         c3 = lv.three_c
         if c3 is not None and lv.misses:
             lines.append(f"  miss classification     {'per-reference':>14} {'aggregate':>12}")
@@ -118,10 +124,22 @@ def format_report(stats: HierarchyStats, trace_name: str | None = None) -> str:
         lines.append("")
 
     lines.append(BAR)
+    lines.append(
+        f"DRAM traffic            : {_size_str(s.dram_bytes_read)} read"
+        f" / {_size_str(s.dram_bytes_written)} written"
+    )
     lines.append(f"AMAT (analytic formula) : {s.amat:8.3f} cycles")
     lines.append(
         f"AMAT (measured)         : {s.measured_amat:8.3f} cycles"
         f"   ({s.total_cycles:,} cycles / {s.accesses:,} accesses)"
+    )
+    lines.append(
+        f"  loads                 : {s.read_amat:8.3f} cycles"
+        f"   ({s.read_cycles:,} cycles / {s.reads:,} loads)"
+    )
+    lines.append(
+        f"  stores                : {s.write_amat:8.3f} cycles"
+        f"   ({s.write_cycles:,} cycles / {s.writes:,} stores)"
     )
     lines.append(BAR)
     return "\n".join(lines)

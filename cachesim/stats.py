@@ -48,6 +48,8 @@ class LevelStats:
     inclusion: str
     write_policy: str
     write_allocate: bool
+    bus_width: int | None
+    transfer_cycles: int
     accesses: int
     hits: int
     misses: int
@@ -66,6 +68,8 @@ class LevelStats:
     back_invalidations: int
     write_throughs: int
     write_bypasses: int
+    bytes_read_from_below: int
+    bytes_written_below: int
     three_c: ThreeCStats | None
 
 
@@ -79,10 +83,16 @@ class HierarchyStats:
     dram_reads: int
     dram_writes: int
     dram_demand_writes: int
+    dram_bytes_read: int
+    dram_bytes_written: int
     memory_access_time: int
     total_cycles: int
+    read_cycles: int
+    write_cycles: int
     amat: float
     measured_amat: float
+    read_amat: float
+    write_amat: float
     levels: list[LevelStats] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -119,6 +129,8 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
                 inclusion=level.inclusion,
                 write_policy=level.write_policy,
                 write_allocate=level.write_allocate,
+                bus_width=level.bus_width,
+                transfer_cycles=level.transfer_cycles,
                 accesses=c.accesses,
                 hits=c.hits,
                 misses=c.misses,
@@ -137,6 +149,8 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
                 back_invalidations=level.back_invalidations,
                 write_throughs=level.write_throughs,
                 write_bypasses=level.write_bypasses,
+                bytes_read_from_below=level.bytes_read_from_below,
+                bytes_written_below=level.bytes_written_below,
                 three_c=three_c,
             )
         )
@@ -147,9 +161,15 @@ def collect(hierarchy: Hierarchy) -> HierarchyStats:
         dram_reads=h.dram_reads,
         dram_writes=h.dram_writes,
         dram_demand_writes=h.dram_demand_writes,
+        dram_bytes_read=h.dram_bytes_read,
+        dram_bytes_written=h.dram_bytes_written,
         memory_access_time=h.memory_access_time,
         total_cycles=h.total_time,
+        read_cycles=h.read_cycles,
+        write_cycles=h.write_cycles,
         amat=h.amat(),
         measured_amat=h.measured_amat(),
+        read_amat=h.read_amat(),
+        write_amat=h.write_amat(),
         levels=levels,
     )

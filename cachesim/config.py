@@ -31,6 +31,7 @@ key                     default        effect
 ``inclusion``           ``"nine"``     relation to the level ABOVE
 ``write_policy``        ``"write-back"``  when stores reach the level below
 ``write_allocate``      ``true``       whether a write miss allocates here
+``bus_width``           ``null``       bytes/cycle of the link from below
 ======================  =============  ==================================
 """
 
@@ -95,7 +96,9 @@ class CacheSpec:
     ``inclusion`` describes this level's relation to the level ABOVE it (see
     ``INCLUSION_POLICIES``), so the first level must leave it at ``"nine"``.
     ``write_policy`` and ``write_allocate`` describe what stores do here
-    (see ``WRITE_POLICIES``).
+    (see ``WRITE_POLICIES``). ``bus_width`` is the width in bytes per cycle
+    of the link that carries blocks from the level below INTO this level;
+    ``None`` models an infinitely wide link, adding no transfer term.
     """
 
     name: str
@@ -110,6 +113,7 @@ class CacheSpec:
     inclusion: str = "nine"
     write_policy: str = "write-back"
     write_allocate: bool = True
+    bus_width: int | None = None
 
 
 @dataclass(frozen=True)
@@ -253,6 +257,10 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
         raise ConfigError(
             f"{where}: 'write_allocate' must be true or false, got {write_allocate!r}"
         )
+    raw_bus_width = spec.get("bus_width")
+    bus_width = (
+        None if raw_bus_width is None else _require_int(where, "bus_width", raw_bus_width, 1)
+    )
 
     return CacheSpec(
         name=name,
@@ -267,6 +275,7 @@ def _parse_level(where: str, spec: Any) -> CacheSpec:
         inclusion=inclusion,
         write_policy=write_policy,
         write_allocate=write_allocate,
+        bus_width=bus_width,
     )
 
 

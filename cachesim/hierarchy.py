@@ -105,15 +105,35 @@ exclusive
 ``check_inclusion()`` asserts the invariant for every adjacent pair and is
 meant to be called from tests after a random access stream.
 
+Transfer time and bandwidth
+---------------------------
+
+``bus_width`` on a level is the width in bytes per cycle of the link that
+carries blocks from the level below INTO it. A fill then costs
+``ceil(block_size / bus_width)`` cycles on top of the latency, charged to
+the access that caused it, and ``amat()`` carries the same term (see its
+docstring). The default, ``null``, is an infinitely wide link and adds
+nothing, so an existing configuration keeps its timing exactly.
+
+A wider block lowers the miss rate but takes longer to move, which is why
+AMAT against block size is a U: at some width the extra transfer time
+overtakes the misses saved.
+
+Every level also counts the bytes it pulls in from below and pushes down,
+and the hierarchy counts DRAM bytes both ways, so a configuration can be
+judged on traffic as well as on latency.
+
 AMAT (average memory access time) is the headline metric:
 
     AMAT = L1_hit_time + L1_miss_rate * L1_miss_penalty
 
 where L1's miss penalty is itself the AMAT of the rest of the hierarchy, so
 the formula nests. Both the analytic value and the measured average
-(total simulated cycles / accesses) are reported. They agree exactly for an
-allocate-on-miss NINE hierarchy, because every level's access count is then
-the level above's miss count.
+(total simulated cycles / accesses) are reported, along with the measured
+averages split by loads and stores. Analytic and measured agree exactly
+for an allocate-on-miss NINE hierarchy, because every level's access count
+is then the level above's miss count and its fill count is its own miss
+count.
 """
 
 from __future__ import annotations
@@ -140,6 +160,10 @@ class Level:
     write_policy   : "write-back" (default) or "write-through".
     write_allocate : whether a write miss fetches the line into this level
                      (default) or passes the store to the level below.
+    bus_width      : bytes per cycle of the link that carries blocks from
+                     the level below into this one. None (the default)
+                     models an infinitely wide link and adds no transfer
+                     term, preserving the original timing model.
     """
 
     def __init__(
@@ -149,13 +173,21 @@ class Level:
         inclusion: str = "nine",
         write_policy: str = "write-back",
         write_allocate: bool = True,
+        bus_width: int | None = None,
     ) -> None:
         if inclusion not in ("nine", "inclusive", "exclusive"):
             raise ValueError(f"{cache.name}: unknown inclusion policy {inclusion!r}")
         if write_policy not in ("write-back", "write-through"):
             raise ValueError(f"{cache.name}: unknown write policy {write_policy!r}")
+        if bus_width is not None and bus_width < 1:
+            raise ValueError(f"{cache.name}: bus_width must be positive, got {bus_width}")
         self.cache = cache
         self.hit_time = hit_time
+        self.bus_width = bus_width
+        #: Cycles a whole block occupies the link from below, ceil(block/width).
+        self.transfer_cycles = (
+            0 if bus_width is None else -(-cache.block_size // bus_width)  # ceil division
+        )
         self.inclusion = inclusion
         #: True if this level must stay a superset of the level above.
         self.inclusive = inclusion == "inclusive"
@@ -176,12 +208,22 @@ class Level:
         #: Write misses this level declined to allocate for, passing the
         #: store to the level below instead (no-write-allocate).
         self.write_bypasses = 0
+        #: Bytes filled into this level from below (demand and prefetch).
+        self.bytes_read_from_below = 0
+        #: Bytes sent from this level to the level below: write-backs,
+        #: victims handed to an exclusive level, and forwarded stores. The
+        #: trace carries no access size, so a forwarded store is counted as
+        #: a whole block -- an upper bound; the exact transaction counts are
+        #: ``write_throughs`` and ``write_bypasses``.
+        self.bytes_written_below = 0
 
     def reset_stats(self) -> None:
         """Zero this level's counters, including the cache's."""
         self.back_invalidations = 0
         self.write_throughs = 0
         self.write_bypasses = 0
+        self.bytes_read_from_below = 0
+        self.bytes_written_below = 0
         self.cache.reset_stats()
 
 
@@ -219,7 +261,10 @@ class Hierarchy:
         self.dram_reads = 0  # demand fetches that missed every level
         self.dram_writes = 0  # blocks of modified data written out to DRAM
         self.dram_demand_writes = 0  # ... of which were stores no level allocated for
-        self.total_time = 0  # simulated cycles spent on all accesses
+        self.dram_bytes_read = 0
+        self.dram_bytes_written = 0
+        self.read_cycles = 0  # simulated cycles spent on loads
+        self.write_cycles = 0  # ... and on stores
 
     # -- construction helper --------------------------------------------------
 
@@ -248,6 +293,7 @@ class Hierarchy:
                     inclusion=level.inclusion,
                     write_policy=level.write_policy,
                     write_allocate=level.write_allocate,
+                    bus_width=level.bus_width,
                 )
             )
         return cls(levels, spec.memory_access_time)
@@ -286,22 +332,19 @@ class Hierarchy:
         if addr < 0:
             raise ValueError(f"address must be non-negative, got {addr}")
         self.accesses += 1
-        if is_write:
-            self.writes += 1
-        else:
-            self.reads += 1
 
-        block = addr // self.block_size
+        block_size = self.block_size
+        block = addr // block_size
         levels = self.levels
         nlevels = len(levels)
+        exclusive_anywhere = self._has_exclusive
         time = 0
         hit_level = nlevels
         write = is_write  # the store is still looking for a level to take it
         taken = -1  # the level that took it (-1: a load, or nobody yet)
         fill_from = 0  # topmost level this access fills
         forward_from = -1  # level a write-through duplicate must be sent to
-        for i in range(nlevels):
-            level = levels[i]
+        for i, level in enumerate(levels):
             time += level.hit_time  # pay to probe this level
             if level.cache.probe(block, write):
                 hit_level = i
@@ -314,26 +357,27 @@ class Hierarchy:
             if write:
                 if not level.write_allocate:
                     level.write_bypasses += 1
+                    level.bytes_written_below += block_size
                     continue  # no line here; the store goes on down
                 taken = fill_from = i
                 write = False  # below this, the access is an ordinary fill
                 if level.write_through:
                     forward_from = i + 1
         else:
+            time += self.memory_access_time
             if write:
                 # No level allocates on a write miss: the store goes to DRAM
-                # without ever fetching the block.
-                time += self.memory_access_time
+                # without ever fetching the block, so nothing is filled.
                 self.dram_demand_writes += 1
                 self._write_to_memory(block)
-                self.total_time += time
-                return time
-            # Missed every level: fetch from DRAM.
-            time += self.memory_access_time
-            self.dram_reads += 1
+                fill_from = nlevels
+            else:
+                # Missed every level: fetch from DRAM.
+                self.dram_reads += 1
+                self.dram_bytes_read += block_size
 
         dirty = taken >= 0 and not levels[taken].write_through
-        if self._has_exclusive and fill_from < hit_level < nlevels:
+        if exclusive_anywhere and fill_from < hit_level < nlevels:
             # An exclusive level does not keep a block the level above is
             # about to hold: the block moves up, dirty bit and all.
             level = levels[hit_level]
@@ -347,17 +391,27 @@ class Hierarchy:
         # levels are filled only by the evictions of the level above them,
         # unless this very store is what they took.
         for i in range(hit_level - 1, fill_from - 1, -1):
-            if self._has_exclusive and levels[i].exclusive and i != taken:
+            level = levels[i]
+            if exclusive_anywhere and level.exclusive and i != taken:
                 continue
-            evicted = levels[i].cache.allocate(block, dirty=dirty and i == fill_from)
+            time += level.transfer_cycles  # moving the block up occupies the link
+            level.bytes_read_from_below += block_size
+            evicted = level.cache.allocate(block, dirty=dirty and i == fill_from)
             if evicted is not None:
                 self._handle_eviction(i, evicted)
 
         if forward_from >= 0:
-            levels[forward_from - 1].write_throughs += 1
+            level = levels[forward_from - 1]
+            level.write_throughs += 1
+            level.bytes_written_below += block_size
             self._write_back(forward_from, block)
 
-        self.total_time += time
+        if is_write:
+            self.writes += 1
+            self.write_cycles += time
+        else:
+            self.reads += 1
+            self.read_cycles += time
         return time
 
     def _handle_eviction(self, level_index: int, evicted: Evicted) -> None:
@@ -383,6 +437,7 @@ class Hierarchy:
             if evicted.dirty:
                 cache.writebacks_received += 1
                 cache.writeback_allocations += 1
+            self.levels[level_index].bytes_written_below += self.block_size
             passed_on = cache.allocate(evicted.block, dirty=keep_dirty)
             if passed_on is not None:
                 self._handle_eviction(below, passed_on)
@@ -390,8 +445,10 @@ class Hierarchy:
                 # A write-through victim buffer holds no dirty data: the
                 # modified block continues on down.
                 level.write_throughs += 1
+                level.bytes_written_below += self.block_size
                 self._write_back(below + 1, evicted.block)
         elif evicted.dirty:
+            self.levels[level_index].bytes_written_below += self.block_size
             self._write_back(below, evicted.block)
         if self.levels[level_index].inclusive:
             self._back_invalidate(level_index, evicted.block)
@@ -412,6 +469,7 @@ class Hierarchy:
                 continue
             level.back_invalidations += 1
             if removed.dirty:
+                level.bytes_written_below += self.block_size
                 self._write_back(level_index + 1, block)
 
     def _write_back(self, level_index: int, block: int) -> None:
@@ -453,11 +511,13 @@ class Hierarchy:
                     if evicted is not None:
                         self._handle_eviction(level_index, evicted)
                 level.write_throughs += 1
+                level.bytes_written_below += self.block_size
                 level_index += 1
                 continue
             if not cache.mark_dirty(block):
                 if not level.write_allocate:
                     level.write_bypasses += 1
+                    level.bytes_written_below += self.block_size
                     level_index += 1
                     continue
                 cache.writeback_allocations += 1
@@ -468,8 +528,9 @@ class Hierarchy:
         self._write_to_memory(block)
 
     def _write_to_memory(self, block: int) -> None:
-        """A dirty block leaves the last level: one DRAM write."""
+        """A block of modified data leaves the last level: one DRAM write."""
         self.dram_writes += 1
+        self.dram_bytes_written += self.block_size
 
     def flush(self) -> int:
         """Write every dirty line back to DRAM and clean it, top-down.
@@ -485,6 +546,7 @@ class Hierarchy:
                 if dirty:
                     cache.clean(block)
                     cache.writebacks += 1
+                    level.bytes_written_below += self.block_size
                     self._write_back(i + 1, block)
         return self.dram_writes - before
 
@@ -527,7 +589,8 @@ class Hierarchy:
         """
         self.accesses = self.reads = self.writes = 0
         self.dram_reads = self.dram_writes = self.dram_demand_writes = 0
-        self.total_time = 0
+        self.dram_bytes_read = self.dram_bytes_written = 0
+        self.read_cycles = self.write_cycles = 0
         for level in self.levels:
             level.reset_stats()
 
@@ -536,6 +599,11 @@ class Hierarchy:
     def stats(self) -> HierarchyStats:
         """Snapshot every counter and derived metric (see ``cachesim.stats``)."""
         return collect(self)
+
+    @property
+    def total_time(self) -> int:
+        """Simulated cycles spent on all accesses: loads plus stores."""
+        return self.read_cycles + self.write_cycles
 
     @property
     def memory_accesses(self) -> int:
@@ -551,15 +619,41 @@ class Hierarchy:
     def amat(self) -> float:
         """Analytic AMAT via the nested formula, in cycles.
 
-        Built from the bottom up: the miss penalty of the last level is the
-        memory access time; every level above adds
-        ``hit_time + miss_rate * penalty_below``.
+        Written out, with levels numbered from 0 and ``transfer_i`` the
+        cycles a block takes to cross the link into level i::
+
+            AMAT      = hit_time_0 + miss_rate_0 * penalty_0
+            penalty_i = hit_time_{i+1} + transfer_i
+                          + miss_rate_{i+1} * penalty_{i+1}
+            penalty_last = memory_access_time + transfer_last
+
+        so every level pays for its own fill however deep the data came
+        from, and the bottom of the recursion is a DRAM access plus the
+        transfer into the last level. It is computed bottom-up: start at
+        the memory access time, and for each level from the last upwards
+        take ``hit_time + miss_rate * (transfer + penalty_below)``.
+
+        This equals ``measured_amat()`` exactly for an allocate-on-miss
+        NINE hierarchy, because each level is then probed once per miss of
+        the level above and filled once per miss of its own. Levels that do
+        not fill on every miss -- exclusive levels, which are filled by the
+        level above instead, and no-write-allocate levels, which decline
+        write misses -- still match on the hit-time and memory terms but
+        make the transfer term an upper bound.
         """
         penalty: float = self.memory_access_time
         for level in reversed(self.levels):
-            penalty = level.hit_time + level.cache.miss_rate * penalty
+            penalty = level.hit_time + level.cache.miss_rate * (level.transfer_cycles + penalty)
         return penalty
 
     def measured_amat(self) -> float:
         """Total simulated cycles / accesses."""
         return self.total_time / self.accesses if self.accesses else 0.0
+
+    def read_amat(self) -> float:
+        """Measured average cycles per load."""
+        return self.read_cycles / self.reads if self.reads else 0.0
+
+    def write_amat(self) -> float:
+        """Measured average cycles per store."""
+        return self.write_cycles / self.writes if self.writes else 0.0
