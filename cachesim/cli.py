@@ -146,11 +146,18 @@ def _register_sweep(subparsers: Subparsers) -> None:
     register(subparsers)
 
 
+def _register_policies(subparsers: Subparsers) -> None:
+    from cachesim.policycmp import register
+
+    register(subparsers)
+
+
 #: Subcommand registration functions, in the order shown by --help.
 COMMANDS: list[Callable[[Subparsers], None]] = [
     register_run,
     register_trace_stats,
     _register_sweep,
+    _register_policies,
     register_gen_traces,
 ]
 
