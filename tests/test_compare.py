@@ -5,11 +5,19 @@ two-block cache miss every time, and through a four-block cache miss only
 once each. Every number in the table follows from that, so the whole
 pipeline -- simulation, statistics, deltas and formatting -- is pinned to
 arithmetic that can be done on paper.
+
+Every pair of configurations compared here differs in exactly ONE key, and
+that is asserted rather than assumed: a table whose two rows differ in two
+places cannot attribute its deltas to either of them, which would defeat
+the point of the command. ``TestCompare`` isolates capacity on the
+three-block cycle; ``TestLargerL1`` isolates the L1 size in the full
+three-level default hierarchy.
 """
 
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
 import os
@@ -34,7 +42,7 @@ CYCLE = [(addr, False) for _ in range(4) for addr in (0, 64, 128)]
 
 
 def one_level(size: int, associativity: int = 2, hit_time: int = 4) -> dict[str, Any]:
-    """A single-level, fully-associative hierarchy of ``size`` bytes."""
+    """A single-level hierarchy of ``size`` bytes over 64 B blocks."""
     return {
         "memory_access_time": 100,
         "levels": [
@@ -47,6 +55,21 @@ def one_level(size: int, associativity: int = 2, hit_time: int = 4) -> dict[str,
             }
         ],
     }
+
+
+def differing_keys(a: dict[str, Any], b: dict[str, Any]) -> set[str]:
+    """The L1 keys on which two ``one_level`` configurations disagree."""
+    left, right = a["levels"][0], b["levels"][0]
+    return {key for key in left.keys() | right.keys() if left.get(key) != right.get(key)}
+
+
+#: The comparison fixture: two configurations one parameter apart. Only
+#: ``size`` differs -- 2 blocks against 4, both 2-way -- so every delta the
+#: table reports is attributable to capacity and nothing else. A 128 B 2-way
+#: cache is one set of two ways; 256 B is two sets of two ways, which holds
+#: blocks 0 and 2 in set 0 and block 1 in set 1, so all three fit.
+SMALL = one_level(128)
+BIG = one_level(256)
 
 
 class TestSimulate(unittest.TestCase):
@@ -84,26 +107,34 @@ class TestSimulate(unittest.TestCase):
 
 class TestCompare(unittest.TestCase):
     def results(self) -> list[Comparison]:
-        return compare(
-            CYCLE,
-            [
-                ("small", "small.json", one_level(128, associativity=2)),
-                ("big", "big.json", one_level(256, associativity=4)),
-            ],
-        )
+        return compare(CYCLE, [("small", "small.json", SMALL), ("big", "big.json", BIG)])
+
+    def test_the_fixture_really_is_one_parameter_apart(self) -> None:
+        """Guards the premise of every other test in this class.
+
+        A comparison whose configurations differ in two places cannot
+        attribute its deltas to either, so the fixture is asserted to be
+        minimal rather than assumed to be.
+        """
+        self.assertEqual(differing_keys(SMALL, BIG), {"size"})
 
     def test_order_and_labels_are_preserved(self) -> None:
         results = self.results()
         self.assertEqual([r.label for r in results], ["small", "big"])
         self.assertEqual([r.source for r in results], ["small.json", "big.json"])
 
-    def test_one_parameter_apart(self) -> None:
+    def test_doubling_the_size_alone_moves_every_column(self) -> None:
+        """128 B holds 2 of the 3 blocks and thrashes; 256 B holds all three."""
         small, big = self.results()
         self.assertEqual(small.stats.levels[0].misses, 12)
         self.assertEqual(big.stats.levels[0].misses, 3)
         self.assertEqual(small.miss_rate("L1"), 1.0)
         self.assertEqual(big.miss_rate("L1"), 0.25)
         self.assertIsNone(big.miss_rate("L2"))
+        # Hit time is identical, so the whole AMAT delta is missed traffic:
+        # 104.0 - 29.0 = 75.0 cycles, all of it 0.75 * 100 cycles of DRAM.
+        self.assertEqual(small.stats.amat - big.stats.amat, 75.0)
+        self.assertEqual(small.stats.dram_reads - big.stats.dram_reads, 9)
 
     def test_to_dict_tags_the_configuration(self) -> None:
         small = self.results()[0]
@@ -132,13 +163,7 @@ class TestLevelNames(unittest.TestCase):
 
 class TestFormatTable(unittest.TestCase):
     def test_baseline_has_blank_deltas_and_others_are_signed(self) -> None:
-        results = compare(
-            CYCLE,
-            [
-                ("small", "small.json", one_level(128, associativity=2)),
-                ("big", "big.json", one_level(256, associativity=4)),
-            ],
-        )
+        results = compare(CYCLE, [("small", "small.json", SMALL), ("big", "big.json", BIG)])
         table = format_table(results).splitlines()
         self.assertEqual(len(table), 3)
         header, baseline, candidate = table
@@ -170,6 +195,80 @@ class TestFormatTable(unittest.TestCase):
         self.assertEqual(columns[0].strip(), "25.00%")  # L1 exists
         self.assertEqual(columns[1].strip(), "-")  # no L2
         self.assertEqual(columns[2].strip(), "-")  # no L3
+
+
+class TestLargerL1(unittest.TestCase):
+    """The default hierarchy against the same hierarchy with a 64 KB L1.
+
+    This is the comparison the command exists for: a full three-level
+    configuration and a candidate that changes exactly one number in it.
+    The workload is a 48 KB buffer scanned twice, chosen so the answer is
+    arithmetic rather than an observation.
+
+    * 48 KB is 768 blocks of 64 B, so the first pass takes 768 compulsory
+      misses however large L1 is.
+    * The 32 KB L1 is 128 sets of 4 ways. Block ``b`` lands in set
+      ``b % 128``, so each set is asked for 6 blocks and holds 4; a
+      forward scan evicts each one just before the next pass wants it, and
+      the second pass misses all 768 again.
+    * The 64 KB L1 is 256 sets of 4 ways: 3 blocks per set, all resident,
+      so the second pass takes no L1 misses at all.
+
+    L1 misses therefore halve, 1,536 to 768, and every L1 miss that
+    remains is compulsory. The trace fits in L2 and L3, so no access
+    reaches DRAM twice and the DRAM columns are identical.
+    """
+
+    def setUp(self) -> None:
+        self.trace = [(addr, op == "W") for addr, op in sequential(48 * 1024, passes=2)]
+        self.bigger = copy.deepcopy(DEFAULT_CONFIG)
+        self.bigger["levels"][0]["size"] = 64 * 1024
+        self.results = compare(
+            self.trace,
+            [
+                ("default", "default", DEFAULT_CONFIG),
+                ("l1-64k", "l1-64k.json", self.bigger),
+            ],
+        )
+
+    def test_the_candidate_changes_exactly_one_number(self) -> None:
+        levels = zip(DEFAULT_CONFIG["levels"], self.bigger["levels"], strict=True)
+        changed = {
+            (index, key)
+            for index, (base, candidate) in enumerate(levels)
+            for key in base.keys() | candidate.keys()
+            if base.get(key) != candidate.get(key)
+        }
+        self.assertEqual(changed, {(0, "size")})
+
+    def test_the_second_pass_stops_missing_in_l1(self) -> None:
+        default, bigger = self.results
+        self.assertEqual(len(self.trace), 12288)
+        self.assertEqual(default.stats.levels[0].misses, 1536)  # both passes miss
+        self.assertEqual(bigger.stats.levels[0].misses, 768)  # compulsory only
+        self.assertEqual(default.miss_rate("L1"), 0.125)
+        self.assertEqual(bigger.miss_rate("L1"), 0.0625)
+
+    def test_dram_traffic_is_unchanged_and_the_deltas_are_negative(self) -> None:
+        """A bigger L1 filters L2, it does not change what DRAM must supply."""
+        default, bigger = self.results
+        self.assertEqual(default.stats.dram_reads, bigger.stats.dram_reads)
+        self.assertEqual(default.stats.dram_writes, bigger.stats.dram_writes)
+        self.assertLess(bigger.stats.amat, default.stats.amat)
+        self.assertLess(bigger.stats.total_cycles, default.stats.total_cycles)
+
+    def test_the_table_signs_the_candidate_row_only(self) -> None:
+        header, baseline, candidate = format_table(self.results).splitlines()
+        self.assertIn("L3 miss", header)
+        self.assertTrue(baseline.startswith("default"))
+        self.assertTrue(candidate.startswith("l1-64k"))
+        self.assertIn("12.50%", baseline)
+        self.assertIn("6.25%", candidate)
+        self.assertIn("175,104", baseline)
+        self.assertIn("165,888", candidate)
+        self.assertIn("-0.750", candidate)  # AMAT 13.5 - 14.25
+        self.assertIn("-5.26%", candidate)  # 165,888 against 175,104
+        self.assertTrue(baseline.rstrip().endswith("-"))  # the baseline is undelta'd
 
 
 class TestLoadConfigs(unittest.TestCase):
