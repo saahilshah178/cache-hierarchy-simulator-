@@ -6,6 +6,8 @@ import contextlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -97,6 +99,22 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(os.listdir(out_dir), ["conflict.trace"])
         self.assertIn("65,536 accesses", out)
+
+    def test_python_dash_m_propagates_the_exit_code(self) -> None:
+        """``python -m cachesim`` must exit like the console script does."""
+        env = {**os.environ, "PYTHONPATH": os.path.dirname(os.path.dirname(__file__))}
+        ok = subprocess.run(
+            [sys.executable, "-m", "cachesim", "--version"], capture_output=True, env=env
+        )
+        self.assertEqual(ok.returncode, 0)
+        self.assertTrue(ok.stdout.startswith(b"cachesim "))
+        bad = subprocess.run(
+            [sys.executable, "-m", "cachesim", "run", os.path.join(self._tmp.name, "nope")],
+            capture_output=True,
+            env=env,
+        )
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn(b"error:", bad.stderr)
 
     def test_version(self) -> None:
         code, out, _ = self.run_main(["--version"])

@@ -1,6 +1,8 @@
-"""Allow ``python -m cachesim``."""
+"""Allow ``python -m cachesim``; exits with the CLI's status code."""
+
+import sys
 
 from cachesim.cli import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
