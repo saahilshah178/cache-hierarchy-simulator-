@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import gzip
+import io
+import json
 import os
 import tempfile
 import unittest
 from typing import ClassVar
 
+from cachesim import run_trace
+from cachesim.cli import main
 from cachesim.trace import detect_format, load_trace, open_trace, parse_trace, write_trace
 from cachesim.workloads import sequential
 
@@ -258,6 +263,42 @@ class TestTraceWriting(TraceFileCase):
         write_trace(path, sequential(buffer_bytes=1024, passes=2))
         expected = [(addr, op == "W") for addr, op in sequential(buffer_bytes=1024, passes=2)]
         self.assertEqual(load_trace(path), expected)
+
+
+class TestSimulatingForeignFormats(TraceFileCase):
+    """Every format reaches the simulator and produces the same run."""
+
+    def accesses(self) -> list[tuple[int, str]]:
+        return list(sequential(buffer_bytes=4096, passes=2))
+
+    def test_run_trace_accepts_an_explicit_format(self) -> None:
+        native = self.path("t.trace")
+        misnamed = self.path("also.trace")  # a Dinero trace with a native name
+        write_trace(native, self.accesses())
+        write_trace(misnamed, self.accesses(), fmt="dinero")
+        expected = run_trace(native).stats().to_dict()
+        got = run_trace(misnamed, fmt="dinero").stats().to_dict()
+        self.assertEqual(got, expected)
+
+    def test_run_trace_detects_the_format_from_the_extension(self) -> None:
+        native = self.path("t.trace")
+        lackey = self.path("t.lackey.gz")
+        write_trace(native, self.accesses())
+        write_trace(lackey, self.accesses(), fmt="lackey")
+        self.assertEqual(run_trace(lackey).stats().to_dict(), run_trace(native).stats().to_dict())
+
+    def test_cli_trace_format_flag(self) -> None:
+        misnamed = self.path("t.trace")
+        write_trace(misnamed, self.accesses(), fmt="dinero")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["run", "--trace-format", "dinero", "--format", "json", misnamed])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["accesses"], 1024)
+
+    def test_cli_rejects_an_unknown_trace_format(self) -> None:
+        with self.assertRaises(SystemExit):
+            main(["run", "--trace-format", "pin", self.path("t.trace")])
 
 
 if __name__ == "__main__":

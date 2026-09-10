@@ -49,14 +49,21 @@ __all__ = [
 ]
 
 
-def run_trace(trace_path: str, config: dict[str, Any] | None = None, warmup: int = 0) -> Hierarchy:
+def run_trace(
+    trace_path: str,
+    config: dict[str, Any] | None = None,
+    warmup: int = 0,
+    fmt: str = "auto",
+) -> Hierarchy:
     """Simulate one trace through one hierarchy; returns the Hierarchy.
 
     ``warmup`` accesses are simulated first and then the statistics are
-    reset, so the returned counters describe only the remainder.
+    reset, so the returned counters describe only the remainder. ``fmt``
+    selects the trace format and defaults to choosing it by extension; see
+    ``cachesim.trace``.
     """
     hierarchy = Hierarchy.from_config(config or DEFAULT_CONFIG)
-    accesses = parse_trace(trace_path)
+    accesses = parse_trace(trace_path, fmt)
     if warmup > 0:
         for n, (addr, is_write) in enumerate(accesses, start=1):
             hierarchy.access(addr, is_write)

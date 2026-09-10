@@ -17,6 +17,7 @@ from cachesim import __version__, run_trace
 from cachesim.config import DEFAULT_CONFIG, ConfigError, load_config
 from cachesim.invariants import check_hierarchy
 from cachesim.report import print_report
+from cachesim.trace import FORMATS
 from cachesim.workloads import SAMPLE_TRACES, write_sample_traces
 
 Subparsers: TypeAlias = "argparse._SubParsersAction[argparse.ArgumentParser]"
@@ -30,7 +31,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         except (OSError, json.JSONDecodeError, ConfigError) as exc:
             sys.exit(f"error: cannot load config {args.config}: {exc}")
     try:
-        hierarchy = run_trace(args.trace, config, warmup=args.warmup)
+        hierarchy = run_trace(args.trace, config, warmup=args.warmup, fmt=args.trace_format)
     except ConfigError as exc:
         sys.exit(f"error: invalid config: {exc}")
     except (OSError, ValueError) as exc:
@@ -57,7 +58,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 def register_run(subparsers: Subparsers) -> None:
     p = subparsers.add_parser("run", help="simulate one trace and print a report")
-    p.add_argument("trace", help="trace file (one 'ADDR R|W' per line)")
+    p.add_argument("trace", help="trace file (native, Dinero IV .din, or Valgrind Lackey)")
+    p.add_argument(
+        "--trace-format",
+        choices=("auto", *FORMATS),
+        default="auto",
+        help="format of the input trace (default: auto, chosen by extension: "
+        ".din is Dinero IV, .lackey/.vg is Valgrind Lackey, anything else is "
+        "the native 'ADDR R|W' format; a .gz suffix is decompressed first)",
+    )
     p.add_argument(
         "--config",
         metavar="FILE",
@@ -75,7 +84,8 @@ def register_run(subparsers: Subparsers) -> None:
         "--format",
         choices=("text", "json"),
         default="text",
-        help="report format: human-readable text (default) or JSON",
+        help="report format: human-readable text (default) or JSON "
+        "(this is the output format; --trace-format selects the input format)",
     )
     p.add_argument(
         "--check",
