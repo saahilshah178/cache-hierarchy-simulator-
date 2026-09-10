@@ -118,7 +118,12 @@ def _cmd_gen_traces(args: argparse.Namespace) -> int:
             )
         return 0
     print(f"generating traces in {args.out_dir}:")
-    write_traces(args.out_dir, args.names or None)
+    try:
+        write_traces(args.out_dir, args.names or None)
+    except OSError as exc:
+        # A directory that cannot be created, or a full disk partway through:
+        # the same one-line report the other commands give a bad path.
+        sys.exit(f"error: cannot write traces in {args.out_dir}: {exc}")
     return 0
 
 

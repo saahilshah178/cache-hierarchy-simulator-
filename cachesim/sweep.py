@@ -58,7 +58,13 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from cachesim.cache import Cache
-from cachesim.cliargs import load_trace_or_error, non_negative_int, parse_size, positive_int
+from cachesim.cliargs import (
+    load_trace_or_error,
+    non_negative_int,
+    parse_size,
+    positive_int,
+    write_or_error,
+)
 from cachesim.config import CacheSpec
 from cachesim.hierarchy import Hierarchy, Level
 from cachesim.plot import (
@@ -604,24 +610,32 @@ def _trace_base(path: str) -> str:
 
 def _maybe_plot(
     args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
     draw: Any,
     *draw_args: Any,
+    out_path: str,
     **draw_kwargs: Any,
 ) -> None:
     """Draw a plot unless plotting is off, reporting what was written.
 
     Plots are drawn when --plot-dir was given explicitly, or when matplotlib
     is installed; --no-plot always wins. A missing matplotlib is a note, not
-    an error: the tables above already tell the story.
+    an error: the tables above already tell the story. A directory that
+    cannot be written IS an error, and a usage one: the user named a place
+    the plot could not go.
     """
     if args.no_plot:
         return
     if args.plot_dir is None and not available():
         return
     try:
-        print(f"saved {draw(*draw_args, **draw_kwargs)}")
+        written = write_or_error(
+            parser, out_path, lambda path: draw(*draw_args, path, **draw_kwargs)
+        )
     except MatplotlibUnavailable as exc:
         print(f"({exc})")
+    else:
+        print(f"saved {written}")
 
 
 def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
@@ -657,15 +671,16 @@ def _run_single(args: argparse.Namespace, parser: argparse.ArgumentParser, plot_
         parser.error(str(exc))
     print_sweep(rows, base, args.param)
     if args.csv:
-        write_csv(args.csv, rows)
+        write_or_error(parser, args.csv, lambda path: write_csv(path, rows))
         print(f"\nwrote {args.csv}")
     name = _trace_base(args.trace)
     _maybe_plot(
         args,
+        parser,
         plot_sweep,
         rows,
         args.param,
-        os.path.join(plot_dir, f"miss_rate_vs_{args.param}_{name}.png"),
+        out_path=os.path.join(plot_dir, f"miss_rate_vs_{args.param}_{name}.png"),
         title=f"Miss rate vs {args.param.replace('_', ' ')}\n"
         f"{name} trace, {_fixed_description(base, args.param)}",
     )
@@ -685,16 +700,17 @@ def _run_grid(args: argparse.Namespace, parser: argparse.ArgumentParser, plot_di
     grid = sweep_grid(accesses, base, sizes, ways, args.mem_time)
     print_grid(grid)
     if args.csv:
-        write_csv(args.csv, grid.flat_rows())
+        write_or_error(parser, args.csv, lambda path: write_csv(path, grid.flat_rows()))
         print(f"\nwrote {args.csv}")
     name = _trace_base(trace_path)
     _maybe_plot(
         args,
+        parser,
         plot_grid,
         grid.miss_rate_matrix(),
         [format_bytes(size) for size in grid.sizes],
         [str(w) for w in grid.associativities],
-        os.path.join(plot_dir, f"miss_rate_grid_{name}.png"),
+        out_path=os.path.join(plot_dir, f"miss_rate_grid_{name}.png"),
         title=f"Miss rate: size x associativity\n"
         f"{name} trace, {grid.block_size} B blocks, {grid.policy.upper()}",
     )
@@ -736,25 +752,27 @@ def _run_default(args: argparse.Namespace, parser: argparse.ArgumentParser, plot
     print_sweep(size_rows, size_base, "size")
 
     if args.csv:
-        write_csv(args.csv, [*assoc_rows, *size_rows])
+        write_or_error(parser, args.csv, lambda path: write_csv(path, [*assoc_rows, *size_rows]))
         print(f"\nwrote {args.csv}")
 
     assoc_name, size_name = _trace_base(assoc_path), _trace_base(size_path)
     _maybe_plot(
         args,
+        parser,
         plot_sweep,
         assoc_rows,
         "associativity",
-        os.path.join(plot_dir, f"miss_rate_vs_associativity_{assoc_name}.png"),
+        out_path=os.path.join(plot_dir, f"miss_rate_vs_associativity_{assoc_name}.png"),
         title=f"Miss rate vs associativity\n{assoc_name} trace, "
         f"{_fixed_description(assoc_base, 'associativity')}",
     )
     _maybe_plot(
         args,
+        parser,
         plot_sweep,
         size_rows,
         "size",
-        os.path.join(plot_dir, f"miss_rate_vs_size_{size_name}.png"),
+        out_path=os.path.join(plot_dir, f"miss_rate_vs_size_{size_name}.png"),
         title=f"Miss rate vs size\n{size_name} trace, {_fixed_description(size_base, 'size')}",
     )
     return 0

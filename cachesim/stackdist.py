@@ -65,7 +65,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from cachesim.cliargs import positive_int, read_trace
+from cachesim.cliargs import positive_int, read_trace, write_or_error
 from cachesim.plot import MatplotlibUnavailable, format_bytes, plot_mrc
 
 #: Stack distance reported for the first reference to a block. Real
@@ -655,7 +655,7 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         )
 
     if args.csv:
-        write_csv(args.csv, rows + set_rows)
+        write_or_error(parser, args.csv, lambda path: write_csv(path, rows + set_rows))
         print(f"\nwrote {args.csv}")
 
     if args.plot:
@@ -669,13 +669,17 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
                 )
             )
         try:
-            written = plot_mrc(
-                [row.capacity for row in rows],
-                [row.miss_ratio for row in rows],
+            written = write_or_error(
+                parser,
                 args.plot,
-                title=f"Miss-ratio curve (LRU)\n{os.path.basename(args.trace)}, "
-                f"{args.block_size} B blocks",
-                extra=extra,
+                lambda path: plot_mrc(
+                    [row.capacity for row in rows],
+                    [row.miss_ratio for row in rows],
+                    path,
+                    title=f"Miss-ratio curve (LRU)\n{os.path.basename(args.trace)}, "
+                    f"{args.block_size} B blocks",
+                    extra=extra,
+                ),
             )
         except MatplotlibUnavailable as exc:
             print(f"\n({exc})")

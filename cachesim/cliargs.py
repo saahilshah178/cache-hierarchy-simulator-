@@ -112,3 +112,24 @@ def load_trace_or_error(parser: argparse.ArgumentParser, path: str) -> list[tupl
     command modules and the simulator cannot mistake one call for the other.
     """
     return read_trace(parser, path, list)
+
+
+# -- writing output ------------------------------------------------------------
+
+
+def write_or_error(parser: argparse.ArgumentParser, path: str, write: Callable[[str], T]) -> T:
+    """Run ``write(path)``, reporting an unwritable path as a CLI error.
+
+    Every command reports a bad *input* path as one line and exit status 2.
+    An unwritable *output* path -- a --csv under a directory that cannot be
+    created, a --plot into a read-only tree -- used to reach the user as a
+    traceback, and after the table had already been printed, so a failed run
+    looked like a successful one with a stack dump stapled to it.
+
+    The writer takes the path rather than being a bare thunk so that the
+    message can name the file the caller asked for.
+    """
+    try:
+        return write(path)
+    except OSError as exc:
+        parser.error(f"cannot write {path}: {exc}")

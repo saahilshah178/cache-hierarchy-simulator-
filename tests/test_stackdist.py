@@ -379,6 +379,15 @@ class TestMrcCli(unittest.TestCase):
             self.assertEqual(int(row["misses"]), expected, row)
             self.assertEqual(int(row["capacity_bytes"]), capacity * 64)
 
+    def test_an_unwritable_csv_is_reported_not_dumped(self) -> None:
+        blocker = os.path.join(self._tmp.name, "blocker")
+        with open(blocker, "w") as handle:
+            handle.write("not a directory\n")
+        code, _, err = self.run_main([self.trace, "--csv", os.path.join(blocker, "mrc.csv")])
+        self.assertEqual(code, 2)
+        self.assertIn("cannot write", err)
+        self.assertNotIn("Traceback", err)
+
     def test_default_table_stops_at_the_compulsory_floor(self) -> None:
         """Three other streams sit between reuses, so no distance exceeds 3.
 

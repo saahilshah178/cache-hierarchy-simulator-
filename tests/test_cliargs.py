@@ -23,6 +23,7 @@ from cachesim.cliargs import (
     parse_size,
     positive_int,
     read_trace,
+    write_or_error,
 )
 from cachesim.stackdist import block_stream
 
@@ -120,6 +121,35 @@ class TestTraceLoading(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             read_trace(self.parser, path, lambda acc: block_stream(acc, 0))
         self.assertEqual(caught.exception.code, 2)
+
+
+class TestWriteOrError(unittest.TestCase):
+    """Output paths get the same one-line treatment as input paths."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.parser = argparse.ArgumentParser(prog="cachesim test")
+
+    def test_the_writers_result_is_passed_through(self) -> None:
+        path = os.path.join(self._tmp.name, "out.txt")
+
+        def write(target: str) -> str:
+            with open(target, "w") as handle:
+                handle.write("hello")
+            return target
+
+        self.assertEqual(write_or_error(self.parser, path, write), path)
+
+    def test_an_unwritable_path_is_a_usage_error_naming_the_file(self) -> None:
+        path = os.path.join(self._tmp.name, "missing-dir", "out.txt")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:
+            write_or_error(self.parser, path, lambda target: open(target, "w").close())
+        self.assertEqual(caught.exception.code, 2)
+        message = stderr.getvalue()
+        self.assertIn("cannot write", message)
+        self.assertIn(path, message)
 
 
 class TestCommandsShareTheHelpers(unittest.TestCase):

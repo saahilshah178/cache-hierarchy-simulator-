@@ -118,6 +118,17 @@ class TestPolicyCompareCLI(unittest.TestCase):
         self.assertTrue(os.path.exists(path))
         self.assertIn(f"wrote {path}", out)
 
+    def test_an_unwritable_csv_is_reported_not_dumped(self) -> None:
+        """A --csv under a plain file cannot be created; say so in one line."""
+        blocker = os.path.join(self._tmp.name, "blocker")
+        with open(blocker, "w") as handle:
+            handle.write("not a directory\n")
+        path = os.path.join(blocker, "out.csv")
+        code, _, err = self.run_main([self.trace, "--size", "8192", "--csv", path])
+        self.assertEqual(code, 2)
+        self.assertIn("cannot write", err)
+        self.assertNotIn("Traceback", err)
+
     def test_bad_flags_fail_with_a_message(self) -> None:
         for argv, fragment in [
             ([self.trace, "--size", "0"], "positive integer"),

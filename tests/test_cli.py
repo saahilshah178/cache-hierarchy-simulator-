@@ -100,6 +100,17 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(os.listdir(out_dir), ["conflict.trace"])
         self.assertIn("65,536 accesses", out)
 
+    def test_gen_traces_reports_an_unwritable_out_dir(self) -> None:
+        blocker = os.path.join(self._tmp.name, "blocker")
+        with open(blocker, "w") as handle:
+            handle.write("not a directory\n")
+        code, _, err = self.run_main(
+            ["gen-traces", "--out-dir", os.path.join(blocker, "gen"), "conflict"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("error: cannot write", err)
+        self.assertNotIn("Traceback", err)
+
     def test_python_dash_m_propagates_the_exit_code(self) -> None:
         """``python -m cachesim`` must exit like the console script does."""
         env = {**os.environ, "PYTHONPATH": os.path.dirname(os.path.dirname(__file__))}

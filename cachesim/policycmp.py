@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from cachesim.cache import Cache
+from cachesim.cliargs import write_or_error
 from cachesim.opt import OPT, opt_misses, run_opt
 from cachesim.policies import POLICIES
 from cachesim.trace import parse_trace
@@ -141,6 +143,9 @@ def format_table(
 
 def write_csv(path: str, results: Sequence[PolicyResult]) -> None:
     """Write the results to ``path`` with a header row."""
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(CSV_HEADER)
@@ -225,7 +230,7 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     )
     print(format_table(results, bound, len(accesses)))
     if args.csv:
-        write_csv(args.csv, results)
+        write_or_error(parser, args.csv, lambda path: write_csv(path, results))
         print(f"\nwrote {args.csv}")
     return 0
 

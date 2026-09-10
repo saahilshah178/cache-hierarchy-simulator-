@@ -477,6 +477,30 @@ class TestSweepCLI(unittest.TestCase):
             written = list(csv.DictReader(handle))
         self.assertEqual([int(r["associativity"]) for r in written], list(ASSOCIATIVITIES))
 
+    def test_an_unwritable_csv_is_reported_not_dumped(self) -> None:
+        """The table is printed first, so the failure must still be legible."""
+        blocker = os.path.join(self._tmp.name, "blocker")
+        with open(blocker, "w") as handle:
+            handle.write("not a directory\n")
+        path = os.path.join(blocker, "sweep.csv")
+        code, _, err = self.run_main(
+            ["--param", "associativity", "--csv", path, "--no-plot", self.trace]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("cannot write", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_an_unwritable_plot_dir_is_reported_not_dumped(self) -> None:
+        blocker = os.path.join(self._tmp.name, "blocker2")
+        with open(blocker, "w") as handle:
+            handle.write("not a directory\n")
+        code, _, err = self.run_main(
+            ["--param", "associativity", "--plot-dir", blocker, self.trace]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("cannot write", err)
+        self.assertNotIn("Traceback", err)
+
     def test_no_plot_writes_nothing(self) -> None:
         out_dir = os.path.join(self._tmp.name, "noplots")
         code, _, _ = self.run_main(["--no-plot", "--plot-dir", out_dir, self.trace])
