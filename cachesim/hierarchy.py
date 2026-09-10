@@ -390,6 +390,24 @@ class Hierarchy:
             i for i, level in enumerate(levels) if level.prefetcher is not None
         )
         self._has_victim = any(level.cache.victim is not None for level in levels)
+        # True when every optional feature of the access path is switched
+        # off, which is the configuration in configs/default.json and the
+        # one nearly every run uses. ``_access_default`` then handles the
+        # access; see ``access`` for what the two paths share.
+        self._all_defaults = (
+            self._constant_latency is not None
+            and not self._has_exclusive
+            and not self._has_inclusive
+            and not self._has_victim
+            and not self._prefetch_levels
+            and all(
+                not level.write_through and level.write_allocate and level.transfer_cycles == 0
+                for level in levels
+            )
+        )
+        #: DRAM latency as a plain int for the fast path, where it is never
+        #: None (``_all_defaults`` requires a constant-latency memory).
+        self._default_latency = 0 if self._constant_latency is None else self._constant_latency
 
         # --- statistics ---
         self.accesses = 0
@@ -468,10 +486,19 @@ class Hierarchy:
 
         Exclusive levels are not filled by the fetch; a block that hit in
         one is moved out of it and up instead.
+
+        A hierarchy with every optional feature switched off is handled by
+        ``_access_default``, which is this method with the branches those
+        features need removed. The code below stays the definition of what
+        an access means; see ``_access_default`` for the argument that the
+        two agree, and ``tests/test_hierarchy.py`` for the check that they
+        do, counter by counter.
         """
         if addr < 0:
             raise ValueError(f"address must be non-negative, got {addr}")
         self.accesses += 1
+        if self._all_defaults:
+            return self._access_default(addr, is_write)
 
         block_size = self.block_size
         block = addr // block_size
@@ -559,6 +586,70 @@ class Hierarchy:
 
         if self._prefetch_levels:
             self._run_prefetchers(block, hit_level)
+
+        if is_write:
+            self.writes += 1
+            self.write_cycles += time
+        else:
+            self.reads += 1
+            self.read_cycles += time
+        return time
+
+    def _access_default(self, addr: int, is_write: bool) -> int:
+        """``access`` for a hierarchy that asks for none of the extras.
+
+        Reached only when ``_all_defaults`` holds: NINE everywhere,
+        write-back and write-allocate everywhere, no bus width, no
+        prefetcher, no victim buffer, and a constant-latency memory. The
+        caller has already rejected a negative address and counted the
+        access.
+
+        Under those conditions the general path collapses, term by term:
+
+        * ``exclusive_anywhere`` is false, so the block never moves up out
+          of a level and no fill is skipped;
+        * every level allocates on a write miss, so the first level takes
+          the store -- on a hit at level 0 or on its miss -- and below it
+          ``write`` is false. ``taken`` is therefore 0 for a store and -1
+          for a load, ``fill_from`` is 0 either way, and ``dirty``, which
+          is ``taken >= 0 and not write_through``, is just ``is_write``;
+        * no level is write-through, so ``forward_from`` stays -1 and
+          nothing is duplicated downwards;
+        * the store is always taken, so the loop's ``else`` can only be a
+          load that missed everything: one DRAM read;
+        * ``transfer_cycles`` is 0 at every level, so the fill loop charges
+          no link time;
+        * no level has a victim buffer, so a probe never displaces a line,
+          and no prefetcher is watching, so nothing is predicted.
+
+        What is left is: probe downwards, fetch, fill upwards. Evictions go
+        through ``_handle_eviction`` exactly as they do on the general path,
+        so nothing about what happens to a line that leaves a level is
+        restated here.
+        """
+        block_size = self.block_size
+        block = addr // block_size
+        levels = self.levels
+        time = 0
+        hit_level = len(levels)
+        write = is_write  # true only until the first level takes the store
+        for i, level in enumerate(levels):
+            time += level.hit_time
+            if level.cache.probe(block, write):
+                hit_level = i
+                break
+            write = False  # level 0 took it; below, this is an ordinary fill
+        else:
+            self.dram_reads += 1
+            self.dram_bytes_read += block_size
+            time += self._default_latency
+
+        for i in range(hit_level - 1, -1, -1):
+            level = levels[i]
+            level.bytes_read_from_below += block_size
+            evicted = level.cache.allocate(block, dirty=is_write and i == 0)
+            if evicted is not None:
+                self._handle_eviction(i, evicted)
 
         if is_write:
             self.writes += 1

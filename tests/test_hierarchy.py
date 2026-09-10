@@ -89,6 +89,117 @@ class TestExampleConfigs(unittest.TestCase):
         self.assertEqual(on_disk, parse_config(DEFAULT_CONFIG))
 
 
+class TestDefaultFastPath(unittest.TestCase):
+    """``_access_default`` must be ``access`` with the branches removed.
+
+    The fast path is a specialisation, not a second model, so the check is
+    to run the same stream twice through identical hierarchies -- once with
+    the fast path enabled and once with the flag forced off, which routes
+    every access through the general code -- and compare the whole
+    statistics snapshot. That covers every counter the simulator keeps,
+    down to the per-level 3-C classification and the byte totals, plus the
+    cycle counts and both AMATs, and it compares the cycles each individual
+    access reported as well.
+    """
+
+    def stream(self, seed: int, length: int = 4000, span: int = 1 << 16) -> list[tuple[int, bool]]:
+        rng = random.Random(seed)
+        return [(rng.randrange(span), rng.random() < 0.35) for _ in range(length)]
+
+    def both_paths(self, config: dict[str, object], accesses: list[tuple[int, bool]]) -> None:
+        fast = Hierarchy.from_config(config)
+        self.assertTrue(fast._all_defaults, "this config should qualify for the fast path")
+        general = Hierarchy.from_config(config)
+        general._all_defaults = False  # force every access through access()
+        fast_cycles = [fast.access(addr, w) for addr, w in accesses]
+        general_cycles = [general.access(addr, w) for addr, w in accesses]
+        self.assertEqual(fast_cycles, general_cycles)
+        self.assertEqual(fast.stats().to_dict(), general.stats().to_dict())
+        # ... and still equal once the dirty data is accounted for.
+        self.assertEqual(fast.flush(), general.flush())
+        self.assertEqual(fast.stats().to_dict(), general.stats().to_dict())
+
+    def test_default_config(self) -> None:
+        self.both_paths(DEFAULT_CONFIG, self.stream(seed=17))
+
+    def test_a_hierarchy_small_enough_to_thrash(self) -> None:
+        # Tiny levels so that the stream evicts, writes back and refills
+        # constantly: the paths have to agree about eviction handling, not
+        # merely about hits.
+        config = {
+            "memory_access_time": 100,
+            "levels": [
+                {"name": "L1", "size": 512, "block_size": 64, "associativity": 2, "hit_time": 4},
+                {"name": "L2", "size": 2048, "block_size": 64, "associativity": 4, "hit_time": 12},
+            ],
+        }
+        self.both_paths(config, self.stream(seed=18, span=8192))
+
+    def test_a_single_level(self) -> None:
+        config = {
+            "memory_access_time": 70,
+            "levels": [
+                {"name": "L1", "size": 1024, "block_size": 32, "associativity": 4, "hit_time": 2}
+            ],
+        }
+        self.both_paths(config, self.stream(seed=19, span=4096))
+
+    def test_writes_only(self) -> None:
+        accesses = [(addr, True) for addr, _ in self.stream(seed=20, span=8192)]
+        self.both_paths(DEFAULT_CONFIG, accesses)
+
+    def test_reads_only(self) -> None:
+        accesses = [(addr, False) for addr, _ in self.stream(seed=21, span=8192)]
+        self.both_paths(DEFAULT_CONFIG, accesses)
+
+    def test_every_extra_leaves_the_fast_path(self) -> None:
+        """Anything the fast path does not model must switch it off."""
+        base = {
+            "name": "L2",
+            "size": 2048,
+            "block_size": 64,
+            "associativity": 4,
+            "hit_time": 12,
+        }
+        extras: list[dict[str, object]] = [
+            {"inclusion": "inclusive"},
+            {"inclusion": "exclusive"},
+            {"write_policy": "write-through"},
+            {"write_allocate": False},
+            {"bus_width": 16},
+            {"prefetcher": "next-line"},
+            {"victim_cache": {"entries": 4}},
+        ]
+        for extra in extras:
+            with self.subTest(extra=extra):
+                config = {
+                    "memory_access_time": 100,
+                    "levels": [
+                        {
+                            "name": "L1",
+                            "size": 512,
+                            "block_size": 64,
+                            "associativity": 2,
+                            "hit_time": 4,
+                        },
+                        {**base, **extra},
+                    ],
+                }
+                self.assertFalse(Hierarchy.from_config(config)._all_defaults)
+        # ... and so must a memory whose latency depends on the address.
+        row_buffer = {
+            "memory": {"type": "row-buffer", "row_size": 8192, "banks": 8},
+            "levels": [
+                {"name": "L1", "size": 512, "block_size": 64, "associativity": 2, "hit_time": 4}
+            ],
+        }
+        self.assertFalse(Hierarchy.from_config(row_buffer)._all_defaults)
+
+    def test_the_shipped_default_config_takes_the_fast_path(self) -> None:
+        path = os.path.join(CONFIG_DIR, "default.json")
+        self.assertTrue(Hierarchy.from_config(load_config(path))._all_defaults)
+
+
 class TestVictimCache(unittest.TestCase):
     """A fully-associative buffer of the lines a level's array has replaced
     (Jouppi, ISCA 1990). A hit there is a hit at the level: the buffer is
